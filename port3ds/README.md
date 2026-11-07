@@ -6,8 +6,8 @@ A port of [Rogue Squadron 64 Recompiled](https://github.com/MikeSemicolonD/Rogue
 environment: the recompiled game runs natively on the ARM11, with its own citro3d renderer for the Factor 5 microcode, the
 recompiled MusyX synth for sound, and the radar on the bottom screen.
 
-**No game files are included.** Download `rs64.3dsx` from the [releases](https://github.com/yaboimanguy-a11y/rogue-squadron-3ds/releases)
-and supply your own ROM dump, as the desktop project does; or build it yourself (below).
+**No game files and no prebuilt 3dsx are included.** The game code is recompiled from your own ROM, so you build the 3dsx
+yourself (below), and it stays personal: do not share it.
 
 ## Status (v0.1)
 
@@ -29,8 +29,8 @@ and supply your own ROM dump, as the desktop project does; or build it yourself 
 
 ## Updates
 
-At each start (with Wi-Fi on) the game checks this repository's latest release. If it is newer, press A to download and install
-it (it runs from the next start) or B to skip. An empty `no_update_check.txt` in `sdmc:/3ds/rs64/` turns the check off.
+At each start (with Wi-Fi on) the game checks this repository's latest release and tells you when a newer version is out, so
+you can pull and rebuild. An empty `no_update_check.txt` in `sdmc:/3ds/rs64/` turns the check off.
 
 ## Building
 
@@ -56,7 +56,7 @@ it (it runs from the next start) or B to skip. An empty `no_update_check.txt` in
 
 ## Installing
 
-1. Put `rs64.3dsx` (from the release zip, or `build3ds/sdcard/3ds/rs64/` if you built it) in `sdmc:/3ds/rs64/`.
+1. Copy `build3ds/sdcard/3ds/rs64/` to `sdmc:/3ds/rs64/`.
 2. Put your ROM (any name, `.z64` / `.n64` / `.v64`) in the same folder. The first start checks it and keeps a verified copy.
 3. Start *Rogue Squadron 64* from the Homebrew Launcher.
 
