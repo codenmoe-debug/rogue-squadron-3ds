@@ -1,0 +1,57 @@
+; Vertex shader of the 3DS renderer (port3ds/renderer_3ds.cpp).
+;
+; The CPU does the whole transform (as the RSP did), so this only maps
+; conventions.  Input:
+;   v0 = x, y, z, w   GL-style clip coordinates (z in -w..w, near = -w)
+;   v1 = u, v         normalised texture coordinates
+;   v2 = r, g, b, a   bytes 0..255 (PICA loaders do not normalise)
+;   v3 = u1, v1       second texture coordinates (N64 TEXEL1)
+;   v4 = f, 0.5       fog-ramp coordinate (f = fog amount 0..1), texture unit 2
+; Output clip z = (z - w) / 2: near -> -w, far -> 0, so with
+; C3D_DepthMap(true, -1, 0) the depth is 1 at the near plane and 0 at the
+; far plane (GEQUAL, cleared to 0), the MvC2 renderer's convention.
+
+; stereo (uniform): x = eye shift k, y = -convergence w, z = horizontal scale (widescreen)
+; clip x = z * x + k * (w - convergence)
+.fvec stereo
+
+.constf consts(0.5, 0.003921569, 1.0, -1.0)
+.alias HALF   consts.xxxx
+.alias INV255 consts.yyyy
+.alias ONE    consts.zzzz
+.alias NEGONE consts.wwww
+
+.out outpos position
+.out outtc0 texcoord0
+.out outclr color
+.out outtc1 texcoord1
+.out outtc2 texcoord2
+
+.alias inpos v0
+.alias intc  v1
+.alias inclr v2
+.alias intc1 v3
+.alias infog v4
+
+.proc main
+    mul r0.x, NEGONE, inpos.w
+    add r0.x, inpos.z, r0.x
+    mul r0.x, HALF, r0.x
+    add r1.x, stereo.y, inpos.w
+    mul r1.x, stereo.x, r1.x
+    mul r2.x, stereo.z, inpos.x
+    add r1.x, r2.x, r1.x
+    mov r1.y, inpos.y
+    mov outpos.xy, r1.xy
+    mov outpos.w, inpos.w
+    mov outpos.z, r0.x
+
+    mov outtc0.xy, intc.xy
+    mov outtc0.zw, ONE
+    mul outclr, INV255, inclr
+    mov outtc1.xy, intc1.xy
+    mov outtc1.zw, ONE
+    mov outtc2.xy, infog.xy
+    mov outtc2.zw, ONE
+    end
+.end

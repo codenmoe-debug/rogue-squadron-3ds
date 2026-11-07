@@ -331,6 +331,33 @@ extern "C" void rs64_hud_shift_radar(uint8_t* rdram, recomp_context* ctx)
     const uint32_t root = rw(rdram, view);
     const uint32_t div = rw(rdram, 0x8011A838u);
 
+#ifdef __3DS__
+
+    // The 3DS renderer finds the radar's model matrix by this translation and shows that part of the picture on the bottom screen.
+    if (root >= 0x80000000u && root < 0x80800000u && rf(rdram, root + 0x48u) > 0.0f) {
+        extern float g_rs3ds_radar_t[3];
+        extern float g_rs3ds_radar_s[2];
+        extern volatile unsigned g_rs3ds_radar_seq;
+
+        g_rs3ds_radar_t[0] = rf(rdram, root + 0x40u);
+        g_rs3ds_radar_t[1] = rf(rdram, root + 0x44u);
+        g_rs3ds_radar_t[2] = rf(rdram, root + 0x48u);
+
+        // the same projection as setupCameraMatrices, as a fallback screen position (N64 pixels, y down)
+        const float fovy = rf(rdram, view + 0x20u);
+        const float t = std::tan(fovy * 3.14159265f / 360.0f);
+        const float asp = div != 0 ? width / height * (float)rw(rdram, 0x8011A844u) / (float)div * rf(rdram, 0x8011A840u) : 0.0f;
+
+        if (width > 0.0f && height > 0.0f && t > 0.0f && asp > 0.0f) {
+            g_rs3ds_radar_s[0] = width * 0.5f + g_rs3ds_radar_t[0] / (t * asp * g_rs3ds_radar_t[2]) * width * 0.5f;
+            g_rs3ds_radar_s[1] = height * 0.5f - g_rs3ds_radar_t[1] / (t * g_rs3ds_radar_t[2]) * height * 0.5f;
+        }
+
+        g_rs3ds_radar_seq = g_rs3ds_radar_seq + 1;
+    }
+
+#endif
+
     if (shift <= 0.0f || height <= 0.0f || div == 0 || root < 0x80000000u || root >= 0x80800000u) return;
 
     // setupCameraMatrices' perspective: fovy at view + 0x20, aspect = W/H * [0x8011A844] / [0x8011A838] * [0x8011A840].

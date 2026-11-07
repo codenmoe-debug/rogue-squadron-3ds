@@ -85,12 +85,12 @@ static std::string fixup(const std::string& original) {
     const std::string cap = "/* fixup: musyx runaway cap */";
     bool musyx = original.find("musyx_audio(") != std::string::npos;
     if (musyx && original.find(cap) == std::string::npos) {
-        insert_after(lines, "    RSP rsp{};", {"    long rs64_iter = 0;  " + cap});
+        insert_after(lines, "    RSP rsp{};", {"    long rs64_iter = 0;  " + cap, "    const auto rs64_t0 = std::chrono::steady_clock::now();  /* fixup: musyx time cap */"});
         insert_after(lines, "do_indirect_jump:", {
             "    if (jump_target == 0) {  " + cap,
             "        return RspExitReason::Broke;",
             "    }",
-            "    if (++rs64_iter > (1L<<20)) {  " + cap,
+            "    if (++rs64_iter > (1L<<20) || ((rs64_iter & 255) == 0 && std::chrono::steady_clock::now() - rs64_t0 > std::chrono::milliseconds(120))) {  " + cap,
             "        static int rs64_musyx_cap = 0;",
             "        if (++rs64_musyx_cap <= 4) {",
             "            fprintf(stderr, \"[musyx-cap] fired #%d, last jump_target=0x%04X\\n\", rs64_musyx_cap, jump_target);",
@@ -114,6 +114,7 @@ static std::string fixup(const std::string& original) {
 
     std::string text = join_lines(lines);
     if (text.find("#include <cstdio>") == std::string::npos) text = "#include <cstdio>\n" + text;
+    if (text.find("#include <chrono>") == std::string::npos) text = "#include <chrono>\n" + text;
     return text;
 }
 

@@ -1,3 +1,5 @@
+> **New Nintendo 3DS port (v0.1):** this fork adds a port to the **New 3DS / New 3DS XL / New 2DS XL only**. No game files or prebuilt 3dsx are included; you build it from your own ROM. See [port3ds/README.md](port3ds/README.md).
+
 <div align="center">
 
   [![Rogue Squadron 64 Recompiled icon](./favicon.ico)](https://mikesemicolond.github.io/RogueSquadron64Recomp/)

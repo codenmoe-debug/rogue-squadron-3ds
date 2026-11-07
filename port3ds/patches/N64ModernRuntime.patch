@@ -1,0 +1,1043 @@
+diff --git a/N64Recomp/include/recomp.h b/N64Recomp/include/recomp.h
+index c07053c..be56632 100644
+--- a/N64Recomp/include/recomp.h
++++ b/N64Recomp/include/recomp.h
+@@ -99,10 +99,20 @@ static inline void DDIVU(uint64_t a, uint64_t b, uint64_t* quot, uint64_t* rem)
+     *rem = a % b;
+ }
+ 
++#if defined(RECOMP_GPR32)
++// 32-bit registers (the 3DS port): the game's code is MIPS II apart from a few functions, which the
++// port builds with 64-bit registers in their own file (port3ds/build.py, split_gpr64). All 32-bit MIPS
++// operations keep their results sign-extended, so the low 32 bits carry the whole value.
++typedef uint32_t gpr;
++
++#define SIGNED(val) \
++    ((int32_t)(val))
++#else
+ typedef uint64_t gpr;
+ 
+ #define SIGNED(val) \
+     ((int64_t)(val))
++#endif
+ 
+ #define ADD32(a, b) \
+     ((gpr)(int32_t)((a) + (b)))
+@@ -134,7 +144,7 @@ typedef uint64_t gpr;
+ 
+ #define SD(val, offset, reg) { \
+     *(uint32_t*)(rdram + RDRAM_OFFSET(((reg) + (offset) + 4))) = (uint32_t)((gpr)(val) >> 0); \
+-    *(uint32_t*)(rdram + RDRAM_OFFSET(((reg) + (offset) + 0))) = (uint32_t)((gpr)(val) >> 32); \
++    *(uint32_t*)(rdram + RDRAM_OFFSET(((reg) + (offset) + 0))) = (uint32_t)((uint64_t)(int64_t)SIGNED(val) >> 32); \
+ }
+ 
+ static inline uint64_t load_doubleword(uint8_t* rdram, gpr reg, gpr offset) {
+diff --git a/librecomp/include/librecomp/addresses.hpp b/librecomp/include/librecomp/addresses.hpp
+index 2633b08..3a73e99 100644
+--- a/librecomp/include/librecomp/addresses.hpp
++++ b/librecomp/include/librecomp/addresses.hpp
+@@ -6,8 +6,13 @@
+ #include "recomp.h"
+ 
+ namespace recomp {
++#ifdef __3DS__
++    // 3DS: the game's 8 MB plus the host tables above it (to 0x80FFFFFF); followed by an unmapped guard.
++    constexpr size_t mem_size = 16ULL * 1024ULL * 1024ULL;
++#else
+     // 512GB (kseg0 size)
+     constexpr size_t mem_size = 512ULL * 1024ULL * 1024ULL;
++#endif
+     // 4GB (the full address space); 32-bit hosts reserve only mem_size and mask guest addresses instead (RDRAM_OFFSET).
+     constexpr size_t allocation_size = sizeof(void*) == 4 ? mem_size : (size_t)(4096ULL * 1024ULL * 1024ULL);
+     // We need a place in rdram to hold the PI handles, so pick an address in extended rdram
+diff --git a/librecomp/include/librecomp/rsp.hpp b/librecomp/include/librecomp/rsp.hpp
+index e7e520b..9e30cc2 100644
+--- a/librecomp/include/librecomp/rsp.hpp
++++ b/librecomp/include/librecomp/rsp.hpp
+@@ -117,6 +117,45 @@ void rsp_dpc_submit(uint8_t* rdram, uint32_t start, uint32_t end);
+ // DMAs 0xF80 bytes to 0x1080 = IMEM+0x80, then jumps there).
+ #define RSP_MEM_ADDR_IMEM 0x1000u
+ 
++#ifdef __3DS__
++// 3DS background audio synth: the game continues before the synth runs, so the RDRAM pages a synth task reads are
++// copied when the task starts and its DMA reads come from those copies (events.cpp). 4 KB pages over 16 MB.
++extern uint8_t* g_rsp_shadow_page[4096];
++extern uint8_t g_rsp_page_used[4096];
++extern bool g_rsp_audio_active;
++
++static inline void dma_rdram_to_dmem(uint8_t* rdram, uint32_t dmem_addr, uint32_t dram_addr, uint32_t rd_len) {
++    if (dmem_addr & RSP_MEM_ADDR_IMEM) return;
++    rd_len = (rd_len & 0xFFF) + 1; // Read length is inclusive
++    dram_addr &= 0xFFFFF8;
++    if (!g_rsp_audio_active) {
++        for (uint32_t i = 0; i < rd_len; i++) {
++            RSP_MEM_B(i, dmem_addr) = MEM_B(0, (int64_t)(int32_t)(dram_addr + i + 0x80000000));
++        }
++        return;
++    }
++    for (uint32_t i = 0; i < rd_len; i++) {
++        const uint32_t idx = ((dram_addr + i) ^ 3) & 0xFFFFFF;
++        g_rsp_page_used[idx >> 12] = 1;
++        const uint8_t* sp = g_rsp_shadow_page[idx >> 12];
++        RSP_MEM_B(i, dmem_addr) = sp ? sp[idx & 0xFFF] : rdram[idx];
++    }
++}
++
++static inline void dma_dmem_to_rdram(uint8_t* rdram, uint32_t dmem_addr, uint32_t dram_addr, uint32_t wr_len) {
++    if (dmem_addr & RSP_MEM_ADDR_IMEM) return;
++    wr_len = (wr_len & 0xFFF) + 1; // Write length is inclusive
++    dram_addr &= 0xFFFFF8;
++    for (uint32_t i = 0; i < wr_len; i++) {
++        const uint8_t b = RSP_MEM_B(i, dmem_addr);
++        MEM_B(0, (int64_t)(int32_t)(dram_addr + i + 0x80000000)) = b;
++        if (g_rsp_audio_active) {
++            const uint32_t idx = ((dram_addr + i) ^ 3) & 0xFFFFFF;
++            if (uint8_t* sp = g_rsp_shadow_page[idx >> 12]) sp[idx & 0xFFF] = b;
++        }
++    }
++}
++#else
+ static inline void dma_rdram_to_dmem(uint8_t* rdram, uint32_t dmem_addr, uint32_t dram_addr, uint32_t rd_len) {
+     if (dmem_addr & RSP_MEM_ADDR_IMEM) return;
+     rd_len = (rd_len & 0xFFF) + 1; // Read length is inclusive
+@@ -135,6 +174,8 @@ static inline void dma_dmem_to_rdram(uint8_t* rdram, uint32_t dmem_addr, uint32_
+     }
+ }
+ 
++#endif
++
+ namespace recomp {
+     namespace rsp {
+         struct callbacks_t {
+diff --git a/librecomp/include/librecomp/rsp_vu.hpp b/librecomp/include/librecomp/rsp_vu.hpp
+index f3aecad..34f08af 100644
+--- a/librecomp/include/librecomp/rsp_vu.hpp
++++ b/librecomp/include/librecomp/rsp_vu.hpp
+@@ -20,7 +20,9 @@
+ // ----------------------------------------------------------------------
+ #include <cstdint>
+ 
+-#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
++#if defined(RSP_FORCE_SISD)
++// the generic per-lane code on any host (port3ds/tools/rsp_vu_fuzz.cpp tests the 3DS paths against it)
++#elif defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+ #define ARCHITECTURE_SUPPORTS_SSE4_1 1
+ #include <nmmintrin.h>
+ using v128 = __m128i;
+diff --git a/librecomp/include/librecomp/rsp_vu_impl.hpp b/librecomp/include/librecomp/rsp_vu_impl.hpp
+index dbf46b2..e226a2a 100644
+--- a/librecomp/include/librecomp/rsp_vu_impl.hpp
++++ b/librecomp/include/librecomp/rsp_vu_impl.hpp
+@@ -113,6 +113,18 @@ auto RSP::accumulatorSaturate(u32 index, bool slice, u16 negative, u16 positive)
+     return !slice ? ACCL.u16(index) : ACCM.u16(index);
+ }
+ 
++
++#if defined(__3DS__) || defined(RSP_VU_FAST32)
++#define RSP_VU_FAST32 1
++// 32-bit lane arithmetic for the multiply/accumulate ops the MusyX synth spends its time in (the 3DS has
++// no SIMD unit for these, and the generic SISD code builds a 64-bit accumulator per lane per step).
++// Bit-exact with the SISD code above: checked by port3ds/tools/rsp_vu_fuzz.cpp.
++namespace rspfast {
++    // clamp the 32-bit ACCH:ACCM slice to s16 (accumulatorSaturate, slice 1)
++    static inline uint16_t sat_hm(int32_t hm) { return hm < -32768 ? 0x8000 : hm > 32767 ? 0x7fff : (uint16_t)hm; }
++}
++#endif
++
+ auto RSP::CFC2(r32& rt, u8 rd) -> void {
+     r128 hi, lo;
+     switch (rd & 3) {
+@@ -911,6 +923,18 @@ auto RSP::VMACQ(r128& vd) -> void {
+ 
+ template<u8 e>
+ auto RSP::VMADH(r128& vd, cr128& vs, cr128& vt) -> void {
++#ifdef RSP_VU_FAST32
++    {
++        cr128 vte = vt(e);
++        for (u32 n = 0; n < 8; n++) {
++            const int32_t hm = (int32_t)(((uint32_t)ACCH.u16(n) << 16) | ACCM.u16(n)) + vs.s16(n) * vte.s16(n);
++            ACCH.u16(n) = (uint16_t)(hm >> 16);
++            ACCM.u16(n) = (uint16_t)hm;
++            vd.u16(n) = rspfast::sat_hm(hm);
++        }
++        return;
++    }
++#endif
+     if constexpr (Accuracy::RSP::SISD) {
+         cr128 vte = vt(e);
+         for (u32 n = 0; n < 8; n++) {
+@@ -976,6 +1000,22 @@ auto RSP::VMADL(r128& vd, cr128& vs, cr128& vt) -> void {
+ 
+ template<u8 e>
+ auto RSP::VMADM(r128& vd, cr128& vs, cr128& vt) -> void {
++#ifdef RSP_VU_FAST32
++    {
++        cr128 vte = vt(e);
++        for (u32 n = 0; n < 8; n++) {
++            const int32_t p = vs.s16(n) * vte.u16(n);
++            const uint32_t lo = ((uint32_t)ACCM.u16(n) << 16) | ACCL.u16(n);
++            const uint32_t nlo = lo + (uint32_t)p;
++            const uint16_t hi = (uint16_t)(ACCH.u16(n) + (p < 0 ? 0xffff : 0) + (nlo < lo ? 1 : 0));
++            ACCH.u16(n) = hi;
++            ACCM.u16(n) = (uint16_t)(nlo >> 16);
++            ACCL.u16(n) = (uint16_t)nlo;
++            vd.u16(n) = rspfast::sat_hm((int32_t)(((uint32_t)hi << 16) | (nlo >> 16)));
++        }
++        return;
++    }
++#endif
+     if constexpr (Accuracy::RSP::SISD) {
+         cr128 vte = vt(e);
+         for (u32 n = 0; n < 8; n++) {
+@@ -1013,6 +1053,23 @@ auto RSP::VMADM(r128& vd, cr128& vs, cr128& vt) -> void {
+ 
+ template<u8 e>
+ auto RSP::VMADN(r128& vd, cr128& vs, cr128& vt) -> void {
++#ifdef RSP_VU_FAST32
++    {
++        cr128 vte = vt(e);
++        for (u32 n = 0; n < 8; n++) {
++            const int32_t p = vs.u16(n) * vte.s16(n);
++            const uint32_t lo = ((uint32_t)ACCM.u16(n) << 16) | ACCL.u16(n);
++            const uint32_t nlo = lo + (uint32_t)p;
++            const uint16_t hi = (uint16_t)(ACCH.u16(n) + (p < 0 ? 0xffff : 0) + (nlo < lo ? 1 : 0));
++            ACCH.u16(n) = hi;
++            ACCM.u16(n) = (uint16_t)(nlo >> 16);
++            ACCL.u16(n) = (uint16_t)nlo;
++            const int32_t hm = (int32_t)(((uint32_t)hi << 16) | (nlo >> 16));
++            vd.u16(n) = hm < -32768 ? 0x0000 : hm > 32767 ? 0xffff : (uint16_t)nlo;
++        }
++        return;
++    }
++#endif
+     if constexpr (Accuracy::RSP::SISD) {
+         cr128 vte = vt(e);
+         for (u32 n = 0; n < 8; n++) {
+@@ -1083,6 +1140,19 @@ auto RSP::VMRG(r128& vd, cr128& vs, cr128& vt) -> void {
+ 
+ template<u8 e>
+ auto RSP::VMUDH(r128& vd, cr128& vs, cr128& vt) -> void {
++#ifdef RSP_VU_FAST32
++    {
++        cr128 vte = vt(e);
++        for (u32 n = 0; n < 8; n++) {
++            const int32_t p = vs.s16(n) * vte.s16(n);
++            ACCH.u16(n) = (uint16_t)(p >> 16);
++            ACCM.u16(n) = (uint16_t)p;
++            ACCL.u16(n) = 0;
++            vd.u16(n) = rspfast::sat_hm(p);
++        }
++        return;
++    }
++#endif
+     if constexpr (Accuracy::RSP::SISD) {
+         cr128 vte = vt(e);
+         for (u32 n = 0; n < 8; n++) {
+@@ -1106,6 +1176,18 @@ auto RSP::VMUDH(r128& vd, cr128& vs, cr128& vt) -> void {
+ 
+ template<u8 e>
+ auto RSP::VMUDL(r128& vd, cr128& vs, cr128& vt) -> void {
++#ifdef RSP_VU_FAST32
++    {
++        cr128 vte = vt(e);
++        for (u32 n = 0; n < 8; n++) {
++            ACCH.u16(n) = 0;
++            ACCM.u16(n) = 0;
++            ACCL.u16(n) = (uint16_t)(((uint32_t)vs.u16(n) * vte.u16(n)) >> 16);
++        }
++        vd = ACCL;
++        return;
++    }
++#endif
+     if constexpr (Accuracy::RSP::SISD) {
+         cr128 vte = vt(e);
+         for (u32 n = 0; n < 8; n++) {
+@@ -1126,6 +1208,19 @@ auto RSP::VMUDL(r128& vd, cr128& vs, cr128& vt) -> void {
+ 
+ template<u8 e>
+ auto RSP::VMUDM(r128& vd, cr128& vs, cr128& vt) -> void {
++#ifdef RSP_VU_FAST32
++    {
++        cr128 vte = vt(e);
++        for (u32 n = 0; n < 8; n++) {
++            const int32_t p = vs.s16(n) * vte.u16(n);
++            ACCH.u16(n) = p < 0 ? 0xffff : 0;
++            ACCM.u16(n) = (uint16_t)((uint32_t)p >> 16);
++            ACCL.u16(n) = (uint16_t)p;
++        }
++        vd = ACCM;
++        return;
++    }
++#endif
+     if constexpr (Accuracy::RSP::SISD) {
+         cr128 vte = vt(e);
+         for (u32 n = 0; n < 8; n++) {
+@@ -1150,6 +1245,19 @@ auto RSP::VMUDM(r128& vd, cr128& vs, cr128& vt) -> void {
+ 
+ template<u8 e>
+ auto RSP::VMUDN(r128& vd, cr128& vs, cr128& vt) -> void {
++#ifdef RSP_VU_FAST32
++    {
++        cr128 vte = vt(e);
++        for (u32 n = 0; n < 8; n++) {
++            const int32_t p = vs.u16(n) * vte.s16(n);
++            ACCH.u16(n) = p < 0 ? 0xffff : 0;
++            ACCM.u16(n) = (uint16_t)((uint32_t)p >> 16);
++            ACCL.u16(n) = (uint16_t)p;
++        }
++        vd = ACCL;
++        return;
++    }
++#endif
+     if constexpr (Accuracy::RSP::SISD) {
+         cr128 vte = vt(e);
+         for (u32 n = 0; n < 8; n++) {
+@@ -1174,6 +1282,19 @@ auto RSP::VMUDN(r128& vd, cr128& vs, cr128& vt) -> void {
+ 
+ template<bool U, u8 e>
+ auto RSP::VMULF(r128& vd, cr128& vs, cr128& vt) -> void {
++#ifdef RSP_VU_FAST32
++    if constexpr (U == 0) {
++        cr128 vte = vt(e);
++        for (u32 n = 0; n < 8; n++) {
++            const int64_t v = (int64_t)(vs.s16(n) * vte.s16(n)) * 2 + 0x8000;
++            ACCH.u16(n) = (uint16_t)(v >> 32);
++            ACCM.u16(n) = (uint16_t)(v >> 16);
++            ACCL.u16(n) = (uint16_t)v;
++            vd.u16(n) = rspfast::sat_hm((int32_t)(v >> 16));
++        }
++        return;
++    }
++#endif
+     if constexpr (Accuracy::RSP::SISD) {
+         cr128 vte = vt(e);
+         for (u32 n = 0; n < 8; n++) {
+diff --git a/librecomp/src/ai.cpp b/librecomp/src/ai.cpp
+index 681c77a..cb60db3 100644
+--- a/librecomp/src/ai.cpp
++++ b/librecomp/src/ai.cpp
+@@ -7,8 +7,31 @@
+ 
+ #define VI_NTSC_CLOCK 48681812
+ 
++#ifdef __3DS__
++// The 3DS caps the output rate: the MusyX synth's work grows with the rate, and the game reads the rate
++// osAiSetFrequency returns (stored at 0x801496F4, used for tempo and envelopes), so it synthesizes at the
++// capped rate. Default 22050 (the game's own rate outside cutscenes, which ask for 32000); an
++// audio_rate.txt in the app folder holding a number (8000..48000) sets another cap.
++static uint32_t audio_rate_cap() {
++    static uint32_t cap = 0;
++    if (cap == 0) {
++        cap = 22050;
++        if (FILE* f = std::fopen("audio_rate.txt", "r")) {
++            unsigned v = 0;
++            if (std::fscanf(f, "%u", &v) == 1 && v >= 8000 && v <= 48000) cap = v;
++            std::fclose(f);
++        }
++        fprintf(stderr, "[audio] output rate cap %u Hz\n", (unsigned)cap);
++    }
++    return cap;
++}
++#endif
++
+ extern "C" void osAiSetFrequency_recomp(uint8_t* rdram, recomp_context* ctx) {
+     uint32_t freq = ctx->r4;
++#ifdef __3DS__
++    if (freq > audio_rate_cap()) freq = audio_rate_cap();
++#endif
+     // This makes actual audio frequency more accurate to console, but may not be desirable
+     //uint32_t dacRate = (uint32_t)(((float)VI_NTSC_CLOCK / freq) + 0.5f);
+     //freq = VI_NTSC_CLOCK / dacRate;
+diff --git a/librecomp/src/fault_guard.cpp b/librecomp/src/fault_guard.cpp
+index ea0eb6f..3c7fe30 100644
+--- a/librecomp/src/fault_guard.cpp
++++ b/librecomp/src/fault_guard.cpp
+@@ -1,6 +1,6 @@
+ #include "librecomp/fault_guard.hpp"
+ 
+-#ifndef _WIN32
++#if !defined(_WIN32) && !defined(__3DS__)
+ #include <atomic>
+ #include <csetjmp>
+ #include <csignal>
+@@ -105,3 +105,11 @@ bool recomp::fault_guard::run(void (*fn)(void*), void* arg, Info* info) {
+     return true;
+ }
+ #endif
++
++#ifdef __3DS__
++// No signal-based fault recovery on the 3DS: a host fault goes to Luma's exception handler.
++bool recomp::fault_guard::run(void (*fn)(void*), void* arg, Info*) {
++    fn(arg);
++    return true;
++}
++#endif
+diff --git a/librecomp/src/files.cpp b/librecomp/src/files.cpp
+index af6f18d..81e92ef 100644
+--- a/librecomp/src/files.cpp
++++ b/librecomp/src/files.cpp
+@@ -1,3 +1,4 @@
++#include <cstdio>
+ #include "files.hpp"
+ 
+ constexpr std::u8string_view backup_suffix = u8".bak";
+@@ -23,12 +24,24 @@ std::ifstream recomp::open_input_file_with_backup(const std::filesystem::path& f
+ std::ofstream recomp::open_output_file_with_backup(const std::filesystem::path& filepath, std::ios_base::openmode mode) {
+     std::filesystem::path temp_path{filepath};
+     temp_path += temp_suffix;
++    std::error_code ec;
++    std::filesystem::create_directories(filepath.parent_path(), ec);
+     std::ofstream temp_file_out{ temp_path, mode };
+ 
+     return temp_file_out;
+ }
+ 
+ bool recomp::finalize_output_file_with_backup(const std::filesystem::path& filepath) {
++#ifdef __3DS__
++    // newlib on the 3DS has no copy_file: keep the old file as the backup and rename the temp file into place
++    {
++        const std::string target = filepath.string(), backup = target + std::string(backup_suffix.begin(), backup_suffix.end());
++        const std::string temp = target + std::string(temp_suffix.begin(), temp_suffix.end());
++        std::remove(backup.c_str());
++        std::rename(target.c_str(), backup.c_str());
++        return std::rename(temp.c_str(), target.c_str()) == 0;
++    }
++#endif
+     std::filesystem::path backup_path{filepath};
+     backup_path += backup_suffix;
+ 
+diff --git a/librecomp/src/overlays.cpp b/librecomp/src/overlays.cpp
+index 8765225..6c45e6f 100644
+--- a/librecomp/src/overlays.cpp
++++ b/librecomp/src/overlays.cpp
+@@ -44,6 +44,17 @@ static std::unordered_map<uint32_t, uint16_t> code_sections_by_rom{};
+ static std::unordered_map<uint32_t, uint16_t> patch_code_sections_by_rom{};
+ static std::vector<LoadedSection> loaded_sections{};
+ static std::unordered_map<int32_t, recomp_func_t*> func_map{};
++#ifdef __3DS__
++// Direct-mapped cache in front of func_map for indirect calls (LOOKUP_FUNC), dropped whenever func_map changes.
++static uint32_t g_fm_gen = 1;
++struct FmCacheEntry { int32_t addr; uint32_t gen; recomp_func_t* func; };
++static FmCacheEntry g_fm_cache[1024];
++#ifdef RS3DS_PROFILE
++#include "rs3ds_prof.h"
++#endif
++#endif
++
++
+ static std::unordered_map<std::string, recomp_func_t*> base_exports{};
+ static std::unordered_map<std::string, recomp_func_ext_t*> ext_base_exports{};
+ static std::unordered_map<std::string, size_t> base_events;
+@@ -213,6 +224,9 @@ std::span<const RelocEntry> recomp::overlays::get_section_relocs(uint16_t code_s
+ 
+ void recomp::overlays::add_loaded_function(int32_t ram, recomp_func_t* func) {
+     func_map[ram] = func;
++    #ifdef __3DS__
++    ++g_fm_gen;
++    #endif
+ }
+ 
+ void load_overlay(size_t section_table_index, int32_t ram) {
+@@ -221,6 +235,9 @@ void load_overlay(size_t section_table_index, int32_t ram) {
+     for (size_t function_index = 0; function_index < section.num_funcs; function_index++) {
+         const FuncEntry& func = section.funcs[function_index];
+         func_map[ram + func.offset] = func.func;
++        #ifdef __3DS__
++        ++g_fm_gen;
++        #endif
+     }
+ 
+     loaded_sections.emplace_back(ram, section_table_index);
+@@ -231,6 +248,9 @@ static void load_special_overlay(const SectionTableEntry& section, int32_t ram)
+     for (size_t function_index = 0; function_index < section.num_funcs; function_index++) {
+         const FuncEntry& func = section.funcs[function_index];
+         func_map[ram + func.offset] = func.func;
++        #ifdef __3DS__
++        ++g_fm_gen;
++        #endif
+     }
+ }
+ 
+@@ -297,6 +317,9 @@ extern "C" void unload_overlay_by_id(uint32_t id) {
+             const auto& func = section.funcs[func_index];
+             uint32_t func_address = func.offset + find_it->loaded_ram_addr;
+             func_map.erase(func_address);
++            #ifdef __3DS__
++            ++g_fm_gen;
++            #endif
+         }
+         // Reset the section's address in the address table
+         section_addresses[section.index] = section.ram_addr;
+@@ -340,6 +363,9 @@ extern "C" void unload_overlays(int32_t ram_addr, uint32_t size) {
+                 const auto& func = section.funcs[func_index];
+                 uint32_t func_address = func.offset + it->loaded_ram_addr;
+                 func_map.erase(func_address);
++                #ifdef __3DS__
++                ++g_fm_gen;
++                #endif
+             }
+             // Reset the section's address in the address table
+             section_addresses[section.index] = section.ram_addr;
+@@ -354,6 +380,9 @@ extern "C" void unload_overlays(int32_t ram_addr, uint32_t size) {
+ 
+ void recomp::overlays::init_overlays() {
+     func_map.clear();
++    #ifdef __3DS__
++    ++g_fm_gen;
++    #endif
+     section_addresses = (int32_t *)calloc(sections_info.total_num_sections, sizeof(int32_t));
+ 
+     // Sort the executable sections by rom address
+@@ -443,6 +472,20 @@ recomp_func_t* recomp::overlays::get_func_by_section_rom_function_vram(uint32_t
+ }
+ 
+ extern "C" recomp_func_t * get_function(int32_t addr) {
++#ifdef __3DS__
++#ifdef RS3DS_PROFILE
++    rs3ds_prof_lookup();
++#endif
++    FmCacheEntry& ce = g_fm_cache[((uint32_t)addr >> 2) & 1023];
++    if (ce.addr == addr && ce.gen == g_fm_gen && ce.func) return ce.func;
++    {
++        auto hit = func_map.find(addr);
++        if (hit != func_map.end()) {
++            ce.addr = addr; ce.gen = g_fm_gen; ce.func = hit->second;
++            return hit->second;
++        }
++    }
++#endif
+     auto func_find = func_map.find(addr);
+     if (func_find == func_map.end()) {
+ #ifdef _MSC_VER
+diff --git a/librecomp/src/recomp.cpp b/librecomp/src/recomp.cpp
+index 7afb2e6..1621e9b 100644
+--- a/librecomp/src/recomp.cpp
++++ b/librecomp/src/recomp.cpp
+@@ -29,6 +29,8 @@
+ #ifdef _WIN32
+ #    define WIN32_LEAN_AND_MEAN
+ #    include <Windows.h>
++#elif defined(__3DS__)
++#    include <3ds.h>
+ #else
+ #    include <sys/mman.h>
+ #    include <dlfcn.h>
+@@ -237,6 +239,7 @@ bool recomp::load_stored_rom(std::u8string& game_id) {
+         return false;
+     }
+ 
++    fprintf(stderr, "[recomp] ROM in memory at %p (%zu KB)\n", (void*)stored_rom_data.data(), stored_rom_data.size() >> 10);
+     recomp::set_rom_contents(std::move(stored_rom_data));
+     return true;
+ }
+@@ -554,6 +557,9 @@ void run_thread_function(uint8_t* rdram, uint64_t addr, uint64_t sp, uint64_t ar
+         auto* c = static_cast<GuardedCall*>(p);
+         invoke_recomp_func(c->func, c->rdram, c->ctx);
+     }, &call, &fault);
++#ifdef __3DS__
++    (void)completed;
++#else
+     if (!completed) {
+         // pc_off is the offset into the faulting library, for addr2line on its unstripped build.
+         Dl_info dl{};
+@@ -563,6 +569,7 @@ void run_thread_function(uint8_t* rdram, uint64_t addr, uint64_t sp, uint64_t ar
+         fflush(stderr);
+     }
+ #endif
++#endif
+ }
+ 
+ void init(uint8_t* rdram, recomp_context* ctx, gpr entrypoint) {
+@@ -895,6 +902,14 @@ void recomp::start(const recomp::Configuration& cfg) {
+             VirtualFree(rdram, 0, MEM_RELEASE);
+         }
+     }
++#elif defined(__3DS__)
++    {
++        // libctru gives all free app memory to the main heap at startup, so RDRAM comes from it
++        rdram = static_cast<uint8_t*>(std::aligned_alloc(0x1000, mem_size));
++        alloc_failed = rdram == nullptr;
++        if (!alloc_failed) std::memset(rdram, 0, mem_size);
++        fprintf(stderr, "[recomp] RDRAM %s at %p (%u MB)\n", alloc_failed ? "allocation FAILED" : "allocated", (void*)rdram, (unsigned)(mem_size >> 20));
++    }
+ #else
+     rdram = (uint8_t*)mmap(NULL, allocation_size, PROT_NONE, MAP_ANON | MAP_PRIVATE, -1, 0);
+     alloc_failed = rdram == reinterpret_cast<uint8_t*>(MAP_FAILED);
+@@ -954,6 +969,11 @@ void recomp::start(const recomp::Configuration& cfg) {
+ #ifdef _WIN32
+     // VirtualFree returns zero on failure.
+     free_failed = (VirtualFree(rdram, 0, MEM_RELEASE) == 0);
++#elif defined(__3DS__)
++    {
++        std::free(rdram);
++        free_failed = false;
++    }
+ #else
+     // munmap returns -1 on failure.
+     free_failed = (munmap(rdram, allocation_size) == -1);
+diff --git a/thirdparty/concurrentqueue/lightweightsemaphore.h b/thirdparty/concurrentqueue/lightweightsemaphore.h
+index 41ba094..cf5118a 100644
+--- a/thirdparty/concurrentqueue/lightweightsemaphore.h
++++ b/thirdparty/concurrentqueue/lightweightsemaphore.h
+@@ -22,6 +22,10 @@ extern "C" {
+ 	__declspec(dllimport) unsigned long __stdcall WaitForSingleObject(void* hHandle, unsigned long dwMilliseconds);
+ 	__declspec(dllimport) int __stdcall ReleaseSemaphore(void* hSemaphore, long lReleaseCount, long* lpPreviousCount);
+ }
++#elif defined(__3DS__)
++#include <mutex>
++#include <condition_variable>
++#include <chrono>
+ #elif defined(__MACH__)
+ #include <mach/mach.h>
+ #elif defined(__unix__)
+@@ -165,6 +169,57 @@ public:
+ 		}
+ 	}
+ };
++#elif defined(__3DS__)
++//---------------------------------------------------------
++// Semaphore (Nintendo 3DS: libstdc++ threads over libctru)
++//---------------------------------------------------------
++class Semaphore
++{
++private:
++	std::mutex m_mutex;
++	std::condition_variable m_cv;
++	int m_count;
++
++	Semaphore(const Semaphore& other) MOODYCAMEL_DELETE_FUNCTION;
++	Semaphore& operator=(const Semaphore& other) MOODYCAMEL_DELETE_FUNCTION;
++
++public:
++	Semaphore(int initialCount = 0) : m_count(initialCount) {}
++
++	bool wait()
++	{
++		std::unique_lock<std::mutex> lk(m_mutex);
++		m_cv.wait(lk, [this] { return m_count > 0; });
++		--m_count;
++		return true;
++	}
++
++	bool try_wait()
++	{
++		std::lock_guard<std::mutex> lk(m_mutex);
++		if (m_count <= 0) return false;
++		--m_count;
++		return true;
++	}
++
++	bool timed_wait(std::uint64_t usecs)
++	{
++		std::unique_lock<std::mutex> lk(m_mutex);
++		if (!m_cv.wait_for(lk, std::chrono::microseconds(usecs), [this] { return m_count > 0; })) return false;
++		--m_count;
++		return true;
++	}
++
++	void signal(int count = 1)
++	{
++		{
++			std::lock_guard<std::mutex> lk(m_mutex);
++			m_count += count;
++		}
++		if (count == 1) m_cv.notify_one();
++		else m_cv.notify_all();
++	}
++};
+ #elif defined(__unix__)
+ //---------------------------------------------------------
+ // Semaphore (POSIX, Linux)
+diff --git a/ultramodern/include/ultramodern/renderer_context.hpp b/ultramodern/include/ultramodern/renderer_context.hpp
+index f43e843..ae026c3 100644
+--- a/ultramodern/include/ultramodern/renderer_context.hpp
++++ b/ultramodern/include/ultramodern/renderer_context.hpp
+@@ -54,6 +54,8 @@ namespace ultramodern {
+             auto operator<=>(const WindowHandle&) const = default;
+         };
+ // TODO add a native window handle option here (Display/Window for x11 and ANativeWindow for Android) as a compile-time option.
++#elif defined(__3DS__)
++        using WindowHandle = void*;
+ #elif defined(__linux__) || defined(__ANDROID__)
+         using WindowHandle = SDL_Window*;
+ #elif defined(__APPLE__)
+diff --git a/ultramodern/include/ultramodern/ultra64.h b/ultramodern/include/ultramodern/ultra64.h
+index 31eb106..43a20d2 100644
+--- a/ultramodern/include/ultramodern/ultra64.h
++++ b/ultramodern/include/ultramodern/ultra64.h
+@@ -291,6 +291,10 @@ PTR(void) osViGetNextFramebuffer();
+ PTR(void) osViGetCurrentFramebuffer();
+ u32 osGetCount();
+ void osSetCount(u32 count);
++#ifdef __3DS__
++// libctru has its own osGetTime (the 3DS clock, used by clock_gettime): the N64 one must not replace it
++#define osGetTime ultramodern_osGetTime
++#endif
+ OSTime osGetTime();
+ void osSetTime(OSTime t);
+ int osSetTimer(RDRAM_ARG PTR(OSTimer) timer, OSTime countdown, OSTime interval, PTR(OSMesgQueue) mq, OSMesg msg);
+diff --git a/ultramodern/src/audio.cpp b/ultramodern/src/audio.cpp
+index cbfeb0b..33ad8dd 100644
+--- a/ultramodern/src/audio.cpp
++++ b/ultramodern/src/audio.cpp
+@@ -50,10 +50,26 @@ void ultramodern::set_audio_frequency(uint32_t freq) {
+     sample_rate = freq;
+ }
+ 
++#ifdef __3DS__
++namespace ultramodern {
++    void output_audio_samples(uint8_t* rdram, uint32_t data, uint32_t sample_count);
++    bool defer_audio_samples(uint32_t data, uint32_t sample_count);   // events.cpp
++    uint32_t deferred_audio_samples();
++}
++
++void ultramodern::output_audio_samples(uint8_t* rdram, uint32_t data, uint32_t sample_count) {
++    if (sample_count > 0 && audio_callbacks.queue_samples) {
++        audio_callbacks.queue_samples(TO_PTR(int16_t, (PTR(int16_t))data), sample_count);
++    }
++}
++#endif
++
+ void ultramodern::queue_audio_buffer(RDRAM_ARG PTR(int16_t) audio_data_, uint32_t byte_count) {
++#ifndef __3DS__
+     // With async audio, the synth fills this buffer on the SP thread after sp_complete
+     // already fired. Wait for it to finish so we never queue a half-synthesized buffer.
+     ultramodern::wait_for_pending_audio_synth();
++#endif
+ 
+     // Ensure that the byte count is an integer multiple of samples.
+     assert((byte_count & 1) == 0);
+@@ -64,6 +80,12 @@ void ultramodern::queue_audio_buffer(RDRAM_ARG PTR(int16_t) audio_data_, uint32_
+     rs64_ai_schedule(byte_count);
+ 
+     // Queue the swapped audio data.
++#ifdef __3DS__
++    // A buffer the background synth is still filling is played by the SP task thread when it is done.
++    if (ultramodern::defer_audio_samples((uint32_t)audio_data_, sample_count)) {
++        return;
++    }
++#endif
+     if (sample_count > 0 && audio_callbacks.queue_samples) {
+         audio_callbacks.queue_samples(TO_PTR(int16_t, audio_data_), sample_count);
+     }
+@@ -86,6 +108,9 @@ uint32_t ultramodern::get_remaining_audio_bytes() {
+     else {
+         buffered_byte_count = 100;
+     }
++#ifdef __3DS__
++    buffered_byte_count += ultramodern::deferred_audio_samples() * sizeof(int16_t);   // queued, waiting for the synth
++#endif
+     // Adjust the reported count to be some number of refreshes in the future, which helps ensure that
+     // there are enough samples even if the audio thread experiences a small amount of lag. This prevents
+     // audio popping on games that use the buffered audio byte count to determine how many samples
+diff --git a/ultramodern/src/error_handling.cpp b/ultramodern/src/error_handling.cpp
+index 8ca779e..e0eeeda 100644
+--- a/ultramodern/src/error_handling.cpp
++++ b/ultramodern/src/error_handling.cpp
+@@ -21,7 +21,7 @@ void ultramodern::error_handling::message_box(const char* msg) {
+ void ultramodern::error_handling::quick_exit(const char* filename, int line, const char *func, int exit_status) {
+     fprintf(stderr, "Exiting with exit status '%i'. Function %s, at file %s:%i\n", exit_status, func, filename, line);
+ 
+-#ifdef __APPLE__
++#if defined(__APPLE__) || defined(__3DS__)
+     std::_Exit(exit_status);
+ #else
+     std::quick_exit(exit_status);
+diff --git a/ultramodern/src/events.cpp b/ultramodern/src/events.cpp
+index b4119b7..8d53550 100644
+--- a/ultramodern/src/events.cpp
++++ b/ultramodern/src/events.cpp
+@@ -1,3 +1,6 @@
++#ifdef RS3DS_PROFILE
++#include "rs3ds_prof.h"
++#endif
+ #include <thread>
+ #include <atomic>
+ #include <chrono>
+@@ -478,17 +481,102 @@ static bool audio_async_enabled() {
+     return s_async != 0;
+ }
+ 
++#ifdef __3DS__
++// The game hands osAiSetNextBuffer a buffer the background synth may still be filling. Instead of
++// stalling the game until the synth is done (the whole game waits on it: wait_for_pending_audio_synth),
++// the buffer is queued here and played by the SP task thread once the synth task that fills it has run.
++namespace ultramodern {
++    void output_audio_samples(uint8_t* rdram, uint32_t data, uint32_t sample_count);   // audio.cpp
++    bool defer_audio_samples(uint32_t data, uint32_t sample_count);
++    uint32_t deferred_audio_samples();
++}
++struct DeferredAudio { uint32_t data, sample_count; uint64_t after_task; };
++static std::mutex g_deferred_audio_mutex;
++static std::deque<DeferredAudio> g_deferred_audio;
++static std::atomic<uint64_t> g_audio_tasks_submitted{ 0 }, g_audio_tasks_done{ 0 };
++static std::atomic<uint32_t> g_deferred_audio_samples{ 0 };
++
++static void flush_deferred_audio_locked() {
++    const uint64_t done = g_audio_tasks_done.load(std::memory_order_acquire);
++    while (!g_deferred_audio.empty() && g_deferred_audio.front().after_task <= done) {
++        const DeferredAudio d = g_deferred_audio.front();
++        g_deferred_audio.pop_front();
++        g_deferred_audio_samples.fetch_sub(d.sample_count, std::memory_order_relaxed);
++        ultramodern::output_audio_samples(events_context.rdram, d.data, d.sample_count);
++    }
++}
++
++bool ultramodern::defer_audio_samples(uint32_t data, uint32_t sample_count) {
++    if (!audio_async_enabled()) return false;
++    std::lock_guard lock{ g_deferred_audio_mutex };
++    const uint64_t after = g_audio_tasks_submitted.load(std::memory_order_acquire);
++    if (g_deferred_audio.empty() && after <= g_audio_tasks_done.load(std::memory_order_acquire)) return false;
++    g_deferred_audio.push_back({ data, sample_count, after });
++    g_deferred_audio_samples.fetch_add(sample_count, std::memory_order_relaxed);
++    flush_deferred_audio_locked();
++    return true;
++}
++
++uint32_t ultramodern::deferred_audio_samples() { return g_deferred_audio_samples.load(std::memory_order_relaxed); }
++#endif
++
+ void ultramodern::wait_for_pending_audio_synth() {
+     if (g_pending_audio_synth.load(std::memory_order_acquire) == 0) {
+         return;
+     }
++#ifdef RS3DS_PROFILE
++    rs3ds_prof_synth_wait(1);
++#endif
+     std::unique_lock lock{ g_audio_synth_mutex };
+     g_audio_synth_cv.wait(lock, [] { return g_pending_audio_synth.load(std::memory_order_acquire) == 0; });
++#ifdef RS3DS_PROFILE
++    rs3ds_prof_synth_wait(0);
++#endif
++}
++
++#ifdef __3DS__
++extern "C" void rs3ds_next_thread_core(int core);   // port3ds/sys_3ds.cpp
++
++// Pages the synth reads (librecomp/rsp.hpp) are copied before the game is let go, so the synth sees the task's inputs as the
++// game left them: the game recycles sample stream blocks and the speech buffer while a background synth task still reads them.
++uint8_t* g_rsp_shadow_page[4096];
++uint8_t g_rsp_page_used[4096];
++bool g_rsp_audio_active = false;
++static constexpr int kShadowPages = 192;
++static uint8_t* g_shadow_pool = nullptr;
++
++static void audio_shadow_begin(uint8_t* rdram) {
++    if (!g_shadow_pool) g_shadow_pool = (uint8_t*)std::malloc((size_t)kShadowPages * 4096);
++    int n = 0;
++    for (int p = 0; p < 4096 && g_shadow_pool; p++) {
++        if (!g_rsp_page_used[p]) continue;
++        if (n == kShadowPages) {
++            static bool s_logged = false;
++            if (!s_logged) { fprintf(stderr, "[audio] synth reads more than %d pages: the rest are read live\n", kShadowPages); s_logged = true; }
++            break;
++        }
++        uint8_t* dst = g_shadow_pool + (size_t)n++ * 4096;
++        std::memcpy(dst, rdram + (size_t)p * 4096, 4096);
++        g_rsp_shadow_page[p] = dst;
++    }
++    g_rsp_audio_active = true;
++}
++
++static void audio_shadow_end() {
++    g_rsp_audio_active = false;
++    std::memset(g_rsp_shadow_page, 0, sizeof g_rsp_shadow_page);
+ }
++#endif
++
+ 
+ void task_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_ready) {
+     ultramodern::set_native_thread_name("SP Task Thread");
++#ifdef __3DS__
++    // shares core 2 with the renderer: the game waits on the audio synth (wait_for_pending_audio_synth), so it goes first
++    ultramodern::set_native_thread_priority(ultramodern::ThreadPriority::VeryHigh);
++#else
+     ultramodern::set_native_thread_priority(ultramodern::ThreadPriority::Normal);
++#endif
+ 
+     // Notify the caller thread that this thread is ready.
+     thread_ready->signal();
+@@ -516,6 +604,9 @@ void task_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_r
+         // assumption the gfx path makes). Default off.
+         const bool early_complete = (audio_async_enabled() && task_type == M_AUDTASK);
+         if (early_complete) {
++#ifdef __3DS__
++            audio_shadow_begin(rdram);
++#endif
+             sp_complete();
+         }
+ 
+@@ -524,6 +615,10 @@ void task_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_r
+             ULTRAMODERN_QUICK_EXIT();
+         }
+ 
++#ifdef __3DS__
++        if (early_complete) audio_shadow_end();
++#endif
++
+         // Tell the game that the RSP has completed (unless already signaled early).
+         if (!early_complete) {
+             sp_complete();
+@@ -535,6 +630,13 @@ void task_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_r
+                 std::lock_guard lock{ g_audio_synth_mutex };
+                 g_audio_synth_cv.notify_all();
+             }
++#ifdef __3DS__
++            if (task_type == M_AUDTASK) {
++                g_audio_tasks_done.fetch_add(1, std::memory_order_acq_rel);
++                std::lock_guard lock{ g_deferred_audio_mutex };
++                flush_deferred_audio_locked();
++            }
++#endif
+         }
+ 
+         (void)task_type;
+@@ -573,6 +675,32 @@ void ultramodern::trigger_config_action() {
+ std::atomic<ultramodern::renderer::SetupResult> renderer_setup_result = ultramodern::renderer::SetupResult::Success;
+ std::atomic<ultramodern::renderer::GraphicsApi> renderer_chosen_api = ultramodern::renderer::GraphicsApi::Auto;
+ 
++// RogueSquadron64Recomp (2026-09-07): ROGUESQ_SP_COMPLETE_AFTER_PARSE=1 delivers the SP-done event only after the list has been
++// parsed, as the RSP would. With the early completion the game recycles DL chunks the HLE is still walking.
++static bool sp_after_parse() {
++    static const bool s_sp_after = [](){ const char* e = std::getenv("ROGUESQ_SP_COMPLETE_AFTER_PARSE"); return !(e && *e == '0'); }();   // default on
++    return s_sp_after;
++}
++
++// The end of a graphics task as the game sees it (SP and DP done).
++static void gfx_task_complete() {
++    if (sp_after_parse()) sp_complete();
++    dp_complete();
++    { std::lock_guard<std::mutex> plock{ g_gfx_parse_mutex }; if (g_gfx_parse_inflight.load(std::memory_order_acquire) > 0) g_gfx_parse_inflight.fetch_sub(1, std::memory_order_acq_rel); }
++    g_gfx_parse_cv.notify_all();
++}
++
++#ifdef __3DS__
++// The 3DS renderer copies the memory a task reads and then lets the game go on with the next frame while it draws this one.
++static bool g_gfx_released = false;
++
++extern "C" void rs3ds_gfx_release() {
++    if (g_gfx_released) return;
++    g_gfx_released = true;
++    gfx_task_complete();
++}
++#endif
++
+ void gfx_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_ready, ultramodern::renderer::WindowHandle window_handle) {
+     bool enabled_instant_present = false;
+     using namespace std::chrono_literals;
+@@ -619,7 +747,7 @@ void gfx_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_re
+                 // RogueSquadron64Recomp (2026-09-07): ROGUESQ_SP_COMPLETE_AFTER_PARSE=1 delivers the SP-done
+                 // event only after the list has been parsed, as the RSP would. With the early completion the
+                 // game recycles DL chunks the HLE is still walking (phantom commands / garbage SETCIMG).
+-                static const bool s_sp_after = [](){ const char* e = std::getenv("ROGUESQ_SP_COMPLETE_AFTER_PARSE"); return !(e && *e == '0'); }();   // default on
++                const bool s_sp_after = sp_after_parse();
+                 if (!s_sp_after) sp_complete();
+                 ultramodern::measure_input_latency();
+ 
+@@ -633,6 +761,9 @@ void gfx_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_re
+                 static unsigned s_task_n = 0; ++s_task_n;
+                 if (s_log_task) { fprintf(stderr, "[gfx-task #%u] parse dl=0x%08X\n", s_task_n, (uint32_t)displaylist); fflush(stderr); }
+                 g_rs64_parse_rdram = task_action->snapshot;
++#ifdef __3DS__
++                g_gfx_released = false;
++#endif
+                 renderer_context->send_dl(&task_action->task);
+                 g_rs64_parse_rdram = nullptr;
+                 // RogueSquadron64Recomp (2026-09-09): dump the EXACT snapshot the parser just walked, so
+@@ -667,10 +798,14 @@ void gfx_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_re
+                 }
+                 [[maybe_unused]] auto renderer_end = std::chrono::high_resolution_clock::now();
+ 
+-                if (s_sp_after) sp_complete();
+-                dp_complete();
+-                { std::lock_guard<std::mutex> plock{ g_gfx_parse_mutex }; if (g_gfx_parse_inflight.load(std::memory_order_acquire) > 0) g_gfx_parse_inflight.fetch_sub(1, std::memory_order_acq_rel); }
+-                g_gfx_parse_cv.notify_all();
++#ifdef __3DS__
++                if (!g_gfx_released) {
++                    g_gfx_released = true;
++                    gfx_task_complete();
++                }
++#else
++                gfx_task_complete();
++#endif
+                 if (s_log_task) { fprintf(stderr, "[gfx-task #%u] done sp+dp signaled parse=%lld us pdl=%lld us hops=%u faces=%u req=%u inflight=%d\n", s_task_n, (long long)std::chrono::duration_cast<std::chrono::microseconds>(renderer_end - renderer_start).count(), g_rs64_pdl_us, g_f5_task_hops, g_f5_task_faces, g_rs64_gfx_requests, g_gfx_parse_inflight.load(std::memory_order_acquire)); fflush(stderr); }
+                 // TODO hook the parsed event up to the actual parsing point when a callback is added to RT64.
+                 ultramodern::extensions::on_displaylist_parsed(displaylist);
+@@ -902,6 +1037,9 @@ void ultramodern::submit_rsp_task(RDRAM_ARG PTR(OSTask) task_) {
+         // for the output buffer to be filled before the game plays it.
+         if (audio_async_enabled() && task->t.type == M_AUDTASK) {
+             g_pending_audio_synth.fetch_add(1, std::memory_order_acq_rel);
++#ifdef __3DS__
++            g_audio_tasks_submitted.fetch_add(1, std::memory_order_acq_rel);
++#endif
+         }
+         events_context.sp_task_queue.enqueue(task);
+     }
+@@ -927,7 +1065,16 @@ void ultramodern::init_events(RDRAM_ARG ultramodern::renderer::WindowHandle wind
+     moodycamel::LightweightSemaphore gfx_thread_ready;
+     moodycamel::LightweightSemaphore task_thread_ready;
+     events_context.rdram = rdram;
++#ifdef __3DS__
++    // the renderer (display-list walk, transforms, citro3d) runs on the system core (core 1, up to the time
++    // limit main_3ds.cpp sets): core 2 is the audio synth's alone, as the game waits on both
++    rs3ds_next_thread_core(1);
++#endif
+     events_context.sp.gfx_thread = std::thread{ gfx_thread_func, rdram, &gfx_thread_ready, window_handle };
++#ifdef __3DS__
++    // the RSP task thread runs the MusyX synth (the heaviest audio work): the New 3DS's spare core
++    rs3ds_next_thread_core(2);
++#endif
+     events_context.sp.task_thread = std::thread{ task_thread_func, rdram, &task_thread_ready };
+ 
+     // Wait for the two sp threads to be ready before continuing to prevent the game from
+diff --git a/ultramodern/src/threads.cpp b/ultramodern/src/threads.cpp
+index 4b5fdb6..ef59941 100644
+--- a/ultramodern/src/threads.cpp
++++ b/ultramodern/src/threads.cpp
+@@ -173,6 +173,30 @@ void ultramodern::set_native_thread_name(const std::string& name) {
+ }
+ 
+ void ultramodern::set_native_thread_priority(ThreadPriority pri) {}
++#elif defined(__3DS__)
++#include <3ds.h>
++
++void ultramodern::set_native_thread_name(const std::string&) {}
++
++// The 3DS kernel never time-slices threads of equal priority: a thread runs until it blocks or a
++// higher-priority one wakes. The timing threads (VI, AI) come first; the runtime's service threads
++// (graphics, RSP, the host loop, savers) next, as they only wake briefly; the game threads last, so
++// a game thread that spins (the N64 idle thread) cannot starve the renderer or the input loop.
++void ultramodern::set_native_thread_priority(ThreadPriority pri) {
++    s32 p = 0x29;
++    switch (pri) {
++        case ThreadPriority::Critical: p = 0x1A; break;
++        case ThreadPriority::VeryHigh: p = 0x20; break;
++        case ThreadPriority::Normal:   p = 0x28; break;
++        case ThreadPriority::High:     p = 0x2D; break;   // the game threads
++        case ThreadPriority::Low:      p = 0x2E; break;
++    }
++    svcSetThreadPriority(CUR_THREAD_HANDLE, p);
++}
++#endif
++
++#ifdef RS3DS_PROFILE
++#include "rs3ds_prof.h"
+ #endif
+ 
+ [[noreturn]] static void end_deleted_thread(UltraThreadContext* cur_context);
+@@ -182,7 +206,15 @@ void wait_for_resumed(RDRAM_ARG UltraThreadContext* thread_context) {
+         printf("[CRASH] wait_for_resumed called with NULL context! thread_self=0x%08X\n", (uint32_t)ultramodern::this_thread()); fflush(stdout);
+         std::abort();
+     }
++#ifdef RS3DS_PROFILE
++    const uint32_t prof_thread = (uint32_t)ultramodern::this_thread();
++    const int prof_id = (int)TO_PTR(OSThread, ultramodern::this_thread())->id;
++    rs3ds_prof_block(prof_thread);
++#endif
+     thread_context->running.wait();
++#ifdef RS3DS_PROFILE
++    rs3ds_prof_resume(prof_thread, prof_id);
++#endif
+     // If this thread's context was replaced/deleted by another thread destroying
+     // us, terminate this host thread directly. The old path called
+     // osDestroyThread(NULL), which throws thread_terminated to unwind out to
