@@ -3,8 +3,10 @@ Star Wars: Rogue Squadron (N64 recomp) - New Nintendo 3DS, test build
 
 NEW 3DS / NEW 3DS XL / NEW 2DS XL ONLY.
 
-Personal build: rs64.3dsx contains code recompiled from your own ROM,
-so do not share it.
+You need your own ROM dump; no game data is included. At each start
+the game checks GitHub for a newer release and offers to install it
+(skip with B; an empty no_update_check.txt in this folder turns the
+check off).
 
 1. Copy this "rs64" folder to your SD card's "3ds" folder:
        /3ds/rs64/rs64.3dsx

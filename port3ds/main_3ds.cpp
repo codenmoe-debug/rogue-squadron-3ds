@@ -235,7 +235,7 @@ int main() {
     consoleInit(GFX_BOTTOM, nullptr);
     irrstInit();
     aptHook(&g_apt_cookie, apt_hook, nullptr);
-    std::printf("Rogue Squadron 64 Recompiled\nNew Nintendo 3DS port v0.1\n\n");
+    std::printf("Rogue Squadron 64 Recompiled\nNew Nintendo 3DS port " RS3DS_VERSION "\n\n");
 
     bool n3ds = false;
     APT_CheckNew3DS(&n3ds);
@@ -244,6 +244,7 @@ int main() {
     mkdir(kDir, 0777);
     chdir(kDir);
     load_aspect();
+    rs3ds_check_for_update(kDir);
     if (FILE* f = std::freopen("sdmc:/3ds/rs64/rs64_log.txt", "w", stderr)) setvbuf(f, nullptr, _IOLBF, 0);
 
     // the 3DS renderer walks the display list straight from RDRAM before the task completes
