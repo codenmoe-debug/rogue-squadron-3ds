@@ -3,25 +3,14 @@ Star Wars: Rogue Squadron (N64 recomp) - New Nintendo 3DS, test build
 
 NEW 3DS / NEW 3DS XL / NEW 2DS XL ONLY.
 
-Personal build: rs64.3dsx contains code recompiled from your own ROM,
-so do not share it.
+The game comes in two parts: rs64.3dsx (the port, from the releases
+page) and game.bin (the game code, made from your own ROM on your
+computer, once, by the setup). Keep game.bin to yourself.
 
-Updates: at each start (with Wi-Fi) the game checks GitHub for a newer
-release. To install one, run "python port3ds/build_from_rom.py --serve"
-on your PC; the game finds it through update_source.txt (in this
-folder) and offers to install the new build (3dsx or CIA). An empty
-no_update_check.txt in this folder turns the checks off.
-
-1. Copy this "rs64" folder to your SD card's "3ds" folder:
-       /3ds/rs64/rs64.3dsx
-2. Put your own ROM dump in the same folder (USA 1.0, any file name,
-   .z64 / .n64 / .v64):
-       /3ds/rs64/Star Wars - Rogue Squadron (USA).z64
-   The first start checks it and stores a verified copy there
-   (about 20 seconds); you can delete your original file afterwards.
-3. Sound needs sdmc:/3ds/dspfirm.cdc (run the "DSP1" homebrew once;
-   you already have it if MvC2 has sound).
-4. Start "Rogue Squadron 64" from the Homebrew Launcher.
+Updates: at each start (with Wi-Fi) the game checks for a newer
+release and offers to install it. If it ever says game.bin must be
+rebuilt, run the setup on your computer again. An empty
+no_update_check.txt in this folder turns the check off.
 
 Controls
    Circle Pad      stick

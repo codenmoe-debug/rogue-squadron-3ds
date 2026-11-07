@@ -58,9 +58,13 @@ DEFS = ["-D__3DS__", "-DNDEBUG", "-DSSE2NEON_SUPPRESS_WARNINGS"] + GPR + PROF
 CXXFLAGS = ARCH_GCC + INT32 + DEFS + ["-std=gnu++20", "-O2", "-fno-strict-aliasing", "-ffunction-sections", "-fdata-sections",
                                        "-Wno-unused-parameter", "-Wno-psabi"]
 # recompiled game code: clang (fast on the huge generated functions), as the MvC2 port
-GAME_CFLAGS = ARCH_CLANG + GPR + PROF + (["-include", str(ROOT / "port3ds/include/rs3ds_prof.h")] if PROFILE else []) + ["-D__3DS__", "-DNDEBUG", "-O2", "-fno-strict-aliasing", "-ffunction-sections", "-fdata-sections", "-fshort-enums",
+GAME_PROF = PROF + (["-include", str(ROOT / "port3ds/include/rs3ds_prof.h")] if PROFILE else [])
+GAME_CFLAGS = ARCH_CLANG + GPR + ["-D__3DS__", "-DNDEBUG", "-O2", "-fno-strict-aliasing", "-ffunction-sections", "-fdata-sections", "-fshort-enums",
                             "-Wno-unused-variable", "-Wno-implicit-function-declaration", "-Dmain=rs_main",
                             "-isystem", str(DKA / "arm-none-eabi/include"), "-include", str(ROOT / "include/mem_wu.h")]
+# game.bin: position independent, only rs3ds_module_entry visible (port3ds/module/module.ver)
+MOD_FLAGS = ["-fPIC", "-fvisibility=hidden"]
+IMPORTS = ROOT / "port3ds/module/imports.txt"
 HOST_CFLAGS = ARCH_GCC + DEFS + ["-std=gnu11", "-O2", "-ffunction-sections", "-fdata-sections"]
 
 
@@ -79,36 +83,42 @@ def stale(out, deps):
     return any(Path(d).exists() and Path(d).stat().st_mtime > t for d in deps)
 
 
-def sources():
-    """(source, kind) for everything that goes into rs64.3dsx; kind: game (clang C), cxx, c."""
-    s = []
-    if SAFE:
-        base = (OUT / "gen/prof") if PROFILE else (ROOT / "RecompiledFuncs")
-        s += [(p, "game") for p in sorted(base.glob("*.c"))]
-    else:
-        s += [(p, "game") for p in sorted((OUT / "gen/recomp").glob("funcs_*.c"))]
-        s += [(OUT / "gen/recomp/funcs64.c", "game64")]
+MODULE_HOST = ["src/game/register_overlays.cpp", "src/game/register_patches.cpp"]
+
+
+def module_sources():
+    """(source, kind) for game.bin: the code recompiled from the ROM plus the tables that name it. Built on the player's
+    computer only; never part of rs64.3dsx."""
+    s = [(p, "game") for p in sorted((ROOT / "RecompiledFuncs").glob("*.c"))]
     s += [(p, "cxx") for p in sorted((ROOT / "RecompiledFuncs").glob("*.cpp"))]
     s += [(ROOT / "src/game/toml_hooks.c", "game"), (ROOT / "RecompiledPatches/patches.c", "game"), (OUT / "gen/patches_bin.c", "game")]
     s += [(ROOT / "build/factor5_ucode/factor5_boot_recompiled.c", "cxx"), (ROOT / "build/factor5_ucode/musyx_audio_recompiled.c", "cxx")]
+    s += [(ROOT / p, "cxx") for p in MODULE_HOST]
+    s += [(ROOT / "port3ds/module/module_entry.cpp", "cxx")]
+    return s
+
+
+def sources():
+    """(source, kind) for rs64.3dsx, the port: no code from the ROM; kind: cxx, c, asm."""
+    s = []
     skip = {"mods.cpp", "mod_events.cpp", "mod_hooks.cpp", "mod_manifest.cpp", "mod_config_api.cpp", "mod_data_api.cpp", "task_win32.cpp"}
     s += [(p, "cxx") for p in sorted((RT / "ultramodern/src").glob("*.cpp")) if p.name not in skip]
     s += [(p, "cxx") for p in sorted((RT / "librecomp/src").glob("*.cpp")) if p.name not in skip]
     s += [(RT / "thirdparty/o1heap/o1heap/o1heap.c", "c"), (RT / "thirdparty/miniz/miniz.c", "c"), (RT / "thirdparty/miniz/miniz_tinfl.c", "c"), (RT / "thirdparty/miniz/miniz_tdef.c", "c")]
-    host = ["src/game/register_overlays.cpp", "src/game/register_patches.cpp", "src/game/builtin_hooks.cpp",
+    host = ["src/game/builtin_hooks.cpp",
             "src/game/nav_sequencer.cpp", "src/game/static_standins.cpp", "src/game/game_state.cpp",
             "src/game/hook_helpers.cpp", "src/game/upstream_compat.cpp", "src/game/mod_content/mod_level_hooks.cpp",
             "src/game/mod_content/asset_overrides.cpp", "src/game/lang/lang.cpp", "src/lockstep/lockstep_core.cpp",
             "src/lockstep/lockstep.cpp", "src/host_api/host_api.cpp", "src/audio/audio.cpp"]
     s += [(ROOT / p, "cxx") for p in host]
     s += [(p, "cxx") for p in sorted((ROOT / "port3ds").glob("*.cpp"))]
-    s += [(OUT / "gen/rs_shbin.c", "c")]
+    s += [(OUT / "gen/rs_shbin.c", "c"), (OUT / "gen/host_exports.S", "asm")]
     return s
 
 
-def obj_path(src):
+def obj_path(src, mod=False):
     rel = os.path.relpath(src, ROOT).replace("/", "__").replace("..", "up")
-    return OUT / "obj" / (rel + ".o")
+    return OUT / ("objm" if mod else "obj") / (rel + ".o")
 
 
 def deps_of(obj):
@@ -120,14 +130,15 @@ def deps_of(obj):
     return [t.replace("\\ ", " ") for t in re.findall(r"(?:\\ |\S)+", text.split(":", 1)[1])] if ":" in text else []
 
 
-def compile_one(src, kind):
-    obj = obj_path(src)
+def compile_one(src, kind, mod=False):
+    obj = obj_path(src, mod)
     if not stale(obj, [src, __file__] + deps_of(obj)):
         return obj
     obj.parent.mkdir(parents=True, exist_ok=True)
     incs = [f"-I{i}" for i in INCS]
     if kind in ("game", "game64"):
         flags = GAME_CFLAGS if kind == "game" else [f for f in GAME_CFLAGS if f != "-DRECOMP_GPR32"]
+        flags = flags + (MOD_FLAGS if mod else GAME_PROF)
         cmd = [CLANG] + flags + [f"-I{i}" for i in INCS if "libctru" not in str(i)] + ["-c", src, "-o", obj]
     elif kind == "cxx":
         lang = ["-x", "c++"] if str(src).endswith(".c") else []
@@ -135,7 +146,9 @@ def compile_one(src, kind):
         hot = ["-O3"] if "factor5_ucode" in str(src) else []
         # the 3DS renderer is the frame-rate limit in missions (core 1)
         if str(src).endswith("renderer_3ds.cpp"): hot = ["-O3", "-ffast-math"]
-        cmd = [GXX] + CXXFLAGS + hot + incs + lang + ["-c", src, "-o", obj]
+        cmd = [GXX] + CXXFLAGS + hot + (MOD_FLAGS if mod else []) + incs + lang + ["-c", src, "-o", obj]
+    elif kind == "asm":
+        cmd = [GCC] + ARCH_GCC + ["-c", src, "-o", obj]
     else:
         cmd = [GCC] + HOST_CFLAGS + incs + ["-c", src, "-o", obj]
     run(cmd[:1] + ["-MMD", "-MF", obj.with_suffix(".d")] + cmd[1:])
@@ -156,7 +169,7 @@ def gen():
     # a new id every build: the in-game updater compares it with the build your PC serves (build_from_rom.py --serve)
     (g / "rs3ds_build_id.h").write_text(f'#define RS3DS_BUILD_ID "{BUILD_ID}"\n')
     pb = ROOT / "patches/patches.bin"
-    if stale(g / "patches_bin.c", [pb]):
+    if pb.exists() and stale(g / "patches_bin.c", [pb]):
         run([sys.executable, ROOT / "port3ds/tools/file_to_c.py", pb, "rs64_patches_bin", g / "patches_bin.c", g / "patches_bin.h"])
 
 
@@ -326,28 +339,10 @@ def make_cia(elf, smdh, sd):
     shutil.copy2(cia, sd / "rs64.cia")
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--jobs", type=int, default=os.cpu_count() or 4)
-    ap.add_argument("--clean", action="store_true")
-    ap.add_argument("--gpr32", action="store_true", help="experimental 32-bit registers, as rs64_gpr32.3dsx")
-    ap.add_argument("--no-profile", action="store_true", help="without the core-0 sampling profiler")
-    a = ap.parse_args()
-    if a.clean and OUT.exists():
-        shutil.rmtree(OUT)
-    missing = [p for p in ["RecompiledFuncs/funcs.h", "RecompiledPatches/patches.c", "patches/patches.bin",
-                           "build/factor5_ucode/musyx_audio_recompiled.c", "src/game/state_table.inl"] if not (ROOT / p).exists()]
-    if missing:
-        raise SystemExit("build3ds: generate these first (port3ds/README.md): " + ", ".join(missing))
-    gen()
-    if not SAFE:
-        split_gpr64()
-    elif PROFILE:
-        instrument_profile()
-    srcs = sources()
+def compile_all(srcs, jobs, mod):
     objs, errors = [], []
-    with cf.ThreadPoolExecutor(a.jobs) as ex:
-        futs = {ex.submit(compile_one, s, k): s for s, k in srcs}
+    with cf.ThreadPoolExecutor(jobs) as ex:
+        futs = {ex.submit(compile_one, s, k, mod): s for s, k in srcs}
         done = 0
         for f in cf.as_completed(futs):
             done += 1
@@ -356,14 +351,77 @@ def main():
             except SystemExit as e:
                 errors.append(str(e))
             if done % 20 == 0 or done == len(srcs):
-                print(f"[{done}/{len(srcs)}] compiled", flush=True)
+                print(f"[{done}/{len(srcs)}] compiled ({'game.bin' if mod else 'rs64.3dsx'})", flush=True)
     if errors:
         raise SystemExit("\n".join(errors))
+    return objs
+
+
+def link_module(objs):
+    """game.bin: an ARM shared object exporting rs3ds_module_entry; everything it needs from the port is imported by name."""
+    so = OUT / "game.so"
+    if stale(so, objs + [ROOT / "port3ds/module/module.ver"]):
+        rsp = OUT / "objm.rsp"
+        rsp.write_text("\n".join(f'"{o}"' for o in objs))
+        run([GXX] + ARCH_GCC + ["-shared", "-nostdlib", "-fPIC", "-Wl,--hash-style=sysv", "-Wl,--gc-sections",
+                                f"-Wl,--version-script={ROOT / 'port3ds/module/module.ver'}", f"-Wl,-Map,{OUT / 'game.map'}",
+                                f"@{rsp}", "-o", so])
+    nm = str(DKA / "bin/arm-none-eabi-nm")
+    out = run([nm, "-D", "--undefined-only", so]).stdout
+    names = sorted({l.split()[-1] for l in out.splitlines() if l.strip()})
+    IMPORTS.write_text("".join(n + "\n" for n in names))
+    binf = OUT / "game.bin"
+    run([str(DKA / "bin/arm-none-eabi-strip"), "--strip-unneeded", so, "-o", binf])
+    print(f"build3ds: game.bin {binf.stat().st_size // 1024} KB, imports {len(names)} names from the port")
+    return binf
+
+
+def gen_host_exports():
+    """host_exports.S: name -> address for every function and variable game.bin imports (port3ds/module/imports.txt)."""
+    names = [n for n in IMPORTS.read_text().split() if n]
+    lines = ["    .section .rodata.rs3ds_host_exports,\"a\"", "    .balign 4", "    .global rs3ds_host_exports", "rs3ds_host_exports:"]
+    for i, n in enumerate(names):
+        lines.append(f"    .word .Lname{i}, {n}")
+    lines.append("    .word 0, 0")
+    lines.append("    .section .rodata.rs3ds_host_names,\"aMS\",%progbits,1")
+    for i, n in enumerate(names):
+        lines.append(f".Lname{i}: .asciz \"{n}\"")
+    out = OUT / "gen/host_exports.S"
+    text = "\n".join(lines) + "\n"
+    if not out.exists() or out.read_text() != text:
+        out.write_text(text)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--jobs", type=int, default=os.cpu_count() or 4)
+    ap.add_argument("--clean", action="store_true")
+    ap.add_argument("--no-profile", action="store_true", help="without the core-0 sampling profiler")
+    ap.add_argument("--port-only", action="store_true", help="only rs64.3dsx (no game.bin): needs nothing made from the ROM")
+    a = ap.parse_args()
+    if not SAFE:
+        raise SystemExit("build3ds: --gpr32 is not supported with the game module")
+    if a.clean and OUT.exists():
+        shutil.rmtree(OUT)
+    if not a.port_only:
+        missing = [p for p in ["RecompiledFuncs/funcs.h", "RecompiledPatches/patches.c", "patches/patches.bin",
+                               "build/factor5_ucode/musyx_audio_recompiled.c"] if not (ROOT / p).exists()]
+        if missing:
+            raise SystemExit("build3ds: generate these first (or use build_from_rom.py): " + ", ".join(missing))
+    if not (ROOT / "src/game/state_table.inl").exists():
+        raise SystemExit("build3ds: src/game/state_table.inl is missing (build_from_rom.py makes it)")
+    gen()
+    game_bin = None
+    if not a.port_only:
+        game_bin = link_module(compile_all(module_sources(), a.jobs, True))
+    gen_host_exports()
+    objs = compile_all(sources(), a.jobs, False)
     # project overrides (src/, port3ds/) before the runtime (lib/): with --allow-multiple-definition the first wins, as the desktop link
     elf = link(sorted(objs, key=lambda o: (o.name.startswith("lib__"), o.name)))
     sd = package(elf)
-    name = "rs64.3dsx" if SAFE else "rs64_gpr32.3dsx"
-    print(f"build3ds: {sd / name} ({(sd / name).stat().st_size // 1024} KB)")
+    if game_bin:
+        shutil.copy2(game_bin, sd / "game.bin")
+    print(f"build3ds: {sd / 'rs64.3dsx'} ({(sd / 'rs64.3dsx').stat().st_size // 1024} KB)")
 
 
 if __name__ == "__main__":

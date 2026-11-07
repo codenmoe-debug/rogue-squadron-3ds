@@ -36,13 +36,15 @@ static constexpr const char* kDir = "sdmc:/3ds/rs64";
 static constexpr uint64_t RS64_ROM_HASH = 0x6B66A44153594DEAULL;
 static constexpr const char8_t* kGameId = u8"rs64.n64.us.1.0";
 
-void rs64_register_overlays();
-const char* const* rs64_register_patches();
-extern "C" void recomp_entrypoint(uint8_t* rdram, recomp_context* ctx);
+#include "module/rs3ds_module.h"
+
+// the game module (game.bin, built from the player's ROM); its synth entry points are read by src/audio/audio.cpp
+static const RS3DSModule* g_module = nullptr;
+RspExitReason (*g_rs3ds_factor5_boot)(uint8_t*, uint32_t) = nullptr;
+RspExitReason (*g_rs3ds_musyx_audio)(uint8_t*, uint32_t) = nullptr;
 extern "C" void rs64_asset_overrides_init();
 extern "C" void rs64_camera_shots_init();
 extern "C" void rs64_mod_levels_init();
-gpr get_entrypoint_address();
 extern "C" { volatile uint8_t* volatile g_recomp_rdram_for_wp_raw = nullptr; }
 extern volatile unsigned int g_vi_tick;
 
@@ -51,7 +53,7 @@ extern "C" void rs64_entrypoint_3ds(uint8_t* rdram, recomp_context* ctx) {
     rs64_asset_overrides_init();
     rs64_camera_shots_init();
     rs64_mod_levels_init();
-    recomp_entrypoint(rdram, ctx);
+    g_module->recomp_entrypoint(rdram, ctx);
 }
 
 // ------------------------------------------------------------------ input
@@ -245,7 +247,6 @@ int main() {
     chdir(kDir);
     load_aspect();
     rs3ds_check_for_update(kDir);
-    rs3ds_update_from_pc(kDir);
     if (FILE* f = std::freopen("sdmc:/3ds/rs64/rs64_log.txt", "w", stderr)) setvbuf(f, nullptr, _IOLBF, 0);
 
     // the 3DS renderer walks the display list straight from RDRAM before the task completes
@@ -259,8 +260,24 @@ int main() {
     std::fprintf(stderr, "[3ds] boot: New 3DS=%d, core 1 time limit 80%%: %s\n", (int)n3ds, R_SUCCEEDED(cpu_limit) ? "ok" : "refused");
     rs3ds_log_memory("boot");
 
-    rs64_register_overlays();
-    rs64_register_patches();
+    {
+        char err[256] = {};
+        g_module = rs3ds_load_module("sdmc:/3ds/rs64/game.bin", err, sizeof err);
+        if (!g_module) {
+            if (std::strcmp(err, "missing") == 0) {
+                wait_exit("The game files are not set up yet.\n\nOn your computer, run the Setup from\nthe download once: it builds game.bin\nfrom your own ROM and copies it to\nsdmc:/3ds/rs64/.");
+            } else {
+                std::fprintf(stderr, "[module] %s\n", err);
+                wait_exit((std::string("Could not load game.bin:\n") + err).c_str());
+            }
+            gfxExit();
+            return 0;
+        }
+        g_rs3ds_factor5_boot = g_module->factor5_boot;
+        g_rs3ds_musyx_audio = g_module->musyx_audio;
+    }
+    g_module->register_overlays();
+    g_module->register_patches();
     recomp::register_config_path(std::filesystem::path(kDir));
     recomp::GameEntry game{};
     game.rom_hash = RS64_ROM_HASH;
@@ -269,7 +286,7 @@ int main() {
     game.mod_game_id = "rs64";
     game.save_type = recomp::SaveType::Eep4k;
     game.is_enabled = true;
-    game.entrypoint_address = get_entrypoint_address();
+    game.entrypoint_address = g_module->entrypoint_address();
     game.entrypoint = rs64_entrypoint_3ds;
     recomp::register_game(game);
 

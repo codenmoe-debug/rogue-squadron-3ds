@@ -34,8 +34,18 @@ static inline void rdram_wr32(uint8_t* rdram, uint32_t off, uint32_t v) {
 static unsigned g_rs64_audio_underruns = 0;
 
 // factor5_boot runs ahead of the MusyX synth.
+#ifdef __3DS__
+
+// The 3DS port loads them from the game module (port3ds/main_3ds.cpp).
+extern RspExitReason (*g_rs3ds_factor5_boot)(uint8_t* rdram, uint32_t ucode_addr);
+extern RspExitReason (*g_rs3ds_musyx_audio)(uint8_t* rdram, uint32_t ucode_addr);
+#define factor5_boot g_rs3ds_factor5_boot
+#define musyx_audio g_rs3ds_musyx_audio
+
+#else
 extern RspExitReason factor5_boot (uint8_t* rdram, uint32_t ucode_addr);
 extern RspExitReason musyx_audio  (uint8_t* rdram, uint32_t ucode_addr);
+#endif
 extern uint8_t dmem[];
 
 extern "C" uint32_t g_audio_ucode_data_addr;

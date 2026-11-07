@@ -1,19 +1,17 @@
 #!/usr/bin/env python3
-"""Builds rs64.3dsx from your own Rogue Squadron ROM, on Windows, macOS or Linux. Run it again to update.
+"""One-time setup: builds game.bin (the game code, from your own Rogue Squadron ROM) and rs64.3dsx, on Windows,
+macOS or Linux. After that the game updates itself on the 3DS; run this again only if the game asks you to.
 
-    python port3ds/build_from_rom.py [path/to/rom.z64] [--sd E:/] [--serve] [--send [3DS-IP]] [--no-pull]
+    python port3ds/build_from_rom.py [path/to/rom.z64] [--sd E:/] [--pick] [--send [3DS-IP]] [--no-pull]
 
 It updates this clone (git pull), applies the 3DS runtime patches, fetches the decomp next to this repo, imports the ROM,
 generates the recompiled code (N64Recomp, RSPRecomp, the patches), then runs port3ds/build.py. The result is
-build3ds/sdcard/3ds/rs64/ (rs64.3dsx, and rs64.cia when makerom and bannertool are installed). --sd copies it to an SD
-card (its root) along with update_source.txt; --serve keeps it available on your network so the game installs it at its
-next start; --send sends rs64.3dsx to a 3DS running the Homebrew Launcher (press Y there first). Nothing it downloads contains game code: that is made here, from your ROM.
+build3ds/sdcard/3ds/rs64/ (game.bin, rs64.3dsx, and rs64.cia when makerom and bannertool are installed). --sd copies it to
+an SD card (its root); --pick asks for the ROM and the SD card with file dialogs; --send sends rs64.3dsx to a 3DS running
+the Homebrew Launcher (press Y there first). Nothing it downloads contains game code: that is made here, from your ROM.
 """
 import argparse
-import functools
 import hashlib
-import http.server
-import socket
 import os
 import platform
 import shutil
@@ -228,6 +226,9 @@ def deliver(sd, send, dkp):
         dst.mkdir(parents=True, exist_ok=True)
         for f in out.iterdir():
             shutil.copy2(f, dst / f.name)
+        # the game reads your ROM from that folder too
+        if not any(p.suffix.lower() in (".z64", ".n64", ".v64") for p in dst.iterdir()):
+            shutil.copy2(REPO / "rogue_squadron.z64", dst / "rogue_squadron.z64")
         print(f"Copied to {dst}")
     if send is not None:
         cmd = [dkp / f"tools/bin/3dslink{EXE}", out / "rs64.3dsx"]
@@ -237,35 +238,23 @@ def deliver(sd, send, dkp):
         run(cmd, check=False)
 
 
-SERVE_PORT = 8364
-
-
-def lan_ip():
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+def pick(kind):
+    """A file dialog for the ROM ("rom") or the SD card ("sd"); None without a display or tkinter."""
     try:
-        s.connect(("192.168.0.1", 9))
-        return s.getsockname()[0]
-    except OSError:
-        return "127.0.0.1"
-    finally:
-        s.close()
-
-
-def write_update_source(folder):
-    (folder / "update_source.txt").write_text(f"{lan_ip()}:{SERVE_PORT}\n")
-
-
-def serve():
-    out = REPO / "build3ds/sdcard/3ds/rs64"
-    step("Serving the build")
-    print(f"Address: {lan_ip()}:{SERVE_PORT}  (the game reads it from sdmc:/3ds/rs64/update_source.txt)")
-    print("Start the game on the 3DS: it offers to install this build. Press Ctrl+C here when done.")
-    handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(out))
-    with http.server.ThreadingHTTPServer(("0.0.0.0", SERVE_PORT), handler) as httpd:
-        try:
-            httpd.serve_forever()
-        except KeyboardInterrupt:
-            pass
+        import tkinter
+        from tkinter import filedialog
+    except ImportError:
+        return None
+    root = tkinter.Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)
+    if kind == "rom":
+        path = filedialog.askopenfilename(title="Your Star Wars: Rogue Squadron ROM (USA 1.0)",
+                                          filetypes=[("N64 ROM", "*.z64 *.n64 *.v64"), ("All files", "*")])
+    else:
+        path = filedialog.askdirectory(title="Your 3DS SD card (its top folder)")
+    root.destroy()
+    return path or None
 
 
 def main():
@@ -274,7 +263,7 @@ def main():
     ap.add_argument("--sd", help="SD card root to copy 3ds/rs64/ to")
     ap.add_argument("--send", nargs="?", const="", help="send rs64.3dsx to the Homebrew Launcher over Wi-Fi (optional 3DS IP)")
     ap.add_argument("--no-pull", action="store_true", help="build without updating this clone first")
-    ap.add_argument("--serve", action="store_true", help="after building, serve it on your network for the in-game updater")
+    ap.add_argument("--pick", action="store_true", help="choose the ROM and the SD card with file dialogs")
     a = ap.parse_args()
 
     if sys.version_info < (3, 11):
@@ -285,17 +274,22 @@ def main():
     dkp, llvm = find_devkitpro(), find_llvm()
     lld = find_lld(llvm)
 
+    if a.pick and not a.rom:
+        a.rom = pick("rom")
     update_sources(not a.no_pull)
     import_rom(a.rom)
     generate(llvm, lld)
     build_3ds(dkp, llvm)
-    write_update_source(REPO / "build3ds/sdcard/3ds/rs64")
+    if a.pick and not a.sd:
+        a.sd = pick("sd")
     deliver(a.sd, a.send, dkp)
     step("Done")
-    print(f"Copy {REPO / 'build3ds/sdcard/3ds/rs64'} to sdmc:/3ds/rs64/ (your ROM goes in that folder too), "
-          "then start Rogue Squadron 64 from the Homebrew Launcher (or install rs64.cia with FBI).")
-    if a.serve:
-        serve()
+    if a.sd:
+        print("Put the SD card in your 3DS and start Rogue Squadron 64 from the Homebrew Launcher.")
+    else:
+        print(f"Copy {REPO / 'build3ds/sdcard/3ds/rs64'} to sdmc:/3ds/rs64/ on your SD card, then start Rogue Squadron 64 "
+              "from the Homebrew Launcher (or install rs64.cia with FBI).")
+    print("From now on the game updates itself on the 3DS (with Wi-Fi). Run this again only if the game asks you to.")
 
 
 if __name__ == "__main__":

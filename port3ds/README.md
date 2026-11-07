@@ -1,15 +1,35 @@
-# Rogue Squadron 64 Recompiled - New Nintendo 3DS port (v0.1)
+# Rogue Squadron 64 Recompiled - New Nintendo 3DS port (v0.2)
 
-**New Nintendo 3DS / New 3DS XL / New 2DS XL only.** The original 3DS and 2DS are too slow.
+**New Nintendo 3DS / New 3DS XL / New 2DS XL only.** The original 3DS and 2DS are too slow. Needs Luma3DS custom firmware.
 
-A port of [Rogue Squadron 64 Recompiled](https://github.com/MikeSemicolonD/RogueSquadron64Recomp) to the New 3DS homebrew
-environment: the recompiled game runs natively on the ARM11, with its own citro3d renderer for the Factor 5 microcode, the
-recompiled MusyX synth for sound, and the radar on the bottom screen.
+A port of [Rogue Squadron 64 Recompiled](https://github.com/MikeSemicolonD/RogueSquadron64Recomp) to the New 3DS: the
+recompiled game runs natively on the ARM11, with its own renderer for the Factor 5 microcode, the recompiled MusyX synth
+for sound, and the radar on the bottom screen.
 
-**No game files and no prebuilt 3dsx are included.** The game code is recompiled from your own ROM, so you build the 3dsx
-yourself (below), and it stays personal: do not share it.
+**No game code or data is distributed.** The game comes in two parts:
 
-## Status (v0.1)
+- `rs64.3dsx`, the port (renderer, sound, controls, updater). It contains no game code and is on the
+  [releases page](https://github.com/yaboimanguy-a11y/rogue-squadron-3ds/releases).
+- `game.bin`, the game code, converted from **your own ROM** on your computer, once. Keep it to yourself.
+
+## Getting started (one time, on a computer)
+
+1. Download the latest release zip and unzip it.
+2. Double-click the setup for your computer: `Setup (Windows).bat`, `Setup (Mac).command`, or run `setup-linux.sh`.
+   It installs the tools it needs (it asks first), then asks for your ROM (*Star Wars: Rogue Squadron*, USA 1.0)
+   and your SD card. The first run takes a while.
+3. Put the SD card in your New 3DS and start *Rogue Squadron 64* from the Homebrew Launcher.
+
+After that you don't need the computer: the game updates itself (below). If an update ever needs a new `game.bin`,
+the game says so; then run the setup again.
+
+## Updates
+
+At each start, with Wi-Fi on, the game checks the latest release. If there is a newer one it offers to install it (A) or
+skip (B): it replaces `rs64.3dsx`, or installs the release's CIA when you started the game from the HOME menu. Then
+restart the game. An empty `no_update_check.txt` in `sdmc:/3ds/rs64/` turns the check off.
+
+## Status (v0.2)
 
 - Playable from boot through missions and cutscenes.
 - Missions run roughly 12-25 fps, cutscenes faster; performance work is ongoing.
@@ -20,58 +40,26 @@ yourself (below), and it stays personal: do not share it.
 
 ## What you need
 
-- A ROM dump of *Star Wars: Rogue Squadron* (USA, **v1.0**), xxHash3-64 `0x6B66A44153594DEA`.
-- macOS or Linux with:
-  - [devkitPro](https://devkitpro.org/wiki/Getting_Started) with the `3ds-dev` group (devkitARM, libctru, citro3d, picasso, 3dsxtool, smdhtool)
-  - LLVM clang with ARM support (Homebrew `llvm` on macOS; set `LLVM_ROOT` if it is elsewhere)
-  - Python 3, CMake, and a host C++ compiler (for N64Recomp / RSPRecomp)
-- A New 3DS with the Homebrew Launcher (Luma3DS custom firmware) and `sdmc:/3ds/dspfirm.cdc` for sound (run the DSP1 homebrew once).
+- A ROM dump of *Star Wars: Rogue Squadron* (USA, **v1.0**).
+- A New 3DS with Luma3DS and the Homebrew Launcher, and `sdmc:/3ds/dspfirm.cdc` for sound (run the DSP1 homebrew once).
+- Once, a Windows, Mac or Linux computer for the setup.
 
-## Building it the easy way (Windows, macOS, Linux)
+## Building by hand
 
-Install once:
-
-| | Windows | macOS | Linux |
-| --- | --- | --- | --- |
-| Git, CMake, a C++ compiler | Git for Windows, CMake, Visual Studio Build Tools (C++) | `xcode-select --install`, `brew install cmake` | `sudo apt install git cmake build-essential` |
-| Python 3.11+ | python.org | `brew install python` | your package manager |
-| devkitPro (3DS) | [installer](https://github.com/devkitPro/installer/releases), tick 3DS | [pkg](https://devkitpro.org/wiki/Getting_Started), then `sudo dkp-pacman -S 3ds-dev` | dkp-pacman, then `sudo dkp-pacman -S 3ds-dev` |
-| LLVM (clang + lld) | [LLVM installer](https://github.com/llvm/llvm-project/releases) | `brew install llvm lld` | `sudo apt install clang lld` |
-
-Then, from this repository:
-
-```bash
-python port3ds/build_from_rom.py path/to/your/rom.z64
-```
-
-It updates the clone, prepares everything, recompiles the game from your ROM and builds the port into
-`build3ds/sdcard/3ds/rs64/`. Run the same command again (the ROM path is only needed the first time) to update.
-
-- `--sd E:/` copies the result onto your SD card.
-- `--serve` keeps the build available on your network for the in-game updater (below).
-- `--send` sends `rs64.3dsx` straight to the Homebrew Launcher over Wi-Fi (press Y in the launcher first).
+`python port3ds/build_from_rom.py [rom] [--sd E:/] [--pick] [--send]` is what the setup runs: it updates the clone,
+recompiles the game from your ROM and builds `game.bin` and `rs64.3dsx` into `build3ds/sdcard/3ds/rs64/`. It needs Git,
+CMake, a C++ compiler, Python 3.11+, devkitPro (3ds-dev) and LLVM clang + lld. `python port3ds/build.py --port-only`
+builds just `rs64.3dsx`, from nothing made from the ROM (that is what releases contain).
 
 ### CIA
 
 If [makerom](https://github.com/3DSGuy/Project_CTR/releases) and [bannertool](https://github.com/Epicpkmn11/bannertool/releases)
 are installed (on your PATH, or set `MAKEROM` / `BANNERTOOL`), the build also makes `rs64.cia`, which you install with FBI
-to start the game from the HOME menu. Like the 3dsx, it is made from your ROM: keep it to yourself.
+to start the game from the HOME menu. Like `rs64.3dsx` it holds only the port; it loads `game.bin` from `sdmc:/3ds/rs64/`.
 
-## Updates
+## Installing by hand
 
-At each start (with Wi-Fi on) the game:
-
-1. checks this repository's latest release and tells you when a newer version is out;
-2. if `update_source.txt` (written by the builder) points at your PC and `build_from_rom.py --serve` is running there with
-   a different build, offers to **install it**: it replaces `rs64.3dsx`, or installs `rs64.cia` through the system when
-   you started the game from the HOME menu. Restart the game to use it.
-
-So updating is: run `python port3ds/build_from_rom.py --serve` on your PC, then start the game on the 3DS and press A.
-An empty `no_update_check.txt` in `sdmc:/3ds/rs64/` turns both checks off.
-
-## Installing
-
-1. Copy `build3ds/sdcard/3ds/rs64/` to `sdmc:/3ds/rs64/`.
+1. Copy `build3ds/sdcard/3ds/rs64/` (`rs64.3dsx`, `game.bin`, `README.txt`) to `sdmc:/3ds/rs64/`.
 2. Put your ROM (any name, `.z64` / `.n64` / `.v64`) in the same folder. The first start checks it and keeps a verified copy.
 3. Start *Rogue Squadron 64* from the Homebrew Launcher.
 

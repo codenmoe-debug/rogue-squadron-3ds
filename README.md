@@ -1,4 +1,4 @@
-> **New Nintendo 3DS port (v0.1):** this fork adds a port to the **New 3DS / New 3DS XL / New 2DS XL only**. No game files or prebuilt 3dsx are included; you build it from your own ROM. See [port3ds/README.md](port3ds/README.md).
+> **New Nintendo 3DS port (v0.1):** this fork adds a port to the **New 3DS / New 3DS XL / New 2DS XL only**. The release holds only the port; a one-time setup on your computer makes the game code from your own ROM. No game files are included. See [port3ds/README.md](port3ds/README.md).
 
 <div align="center">
 

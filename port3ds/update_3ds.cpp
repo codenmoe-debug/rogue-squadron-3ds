@@ -1,7 +1,7 @@
-// Boot-time updates. 1) GitHub: says when a newer release of this port is out (releases carry source only).
-// 2) Your PC: when update_source.txt in the SD folder holds "IP:port" of a PC running build_from_rom.py --serve and the PC
-// has a different build, offers to install it: the 3dsx over this one, or the CIA through the system installer when the
-// game runs from the HOME menu. Skipped without Wi-Fi or when no_update_check.txt exists.
+// Boot-time update: asks GitHub for the latest release of this port and, when it is newer, offers to install it: the
+// release's rs64.3dsx over this one, or its rs64.cia through the system installer when the game runs from the HOME menu.
+// Releases hold only the port (no game code); game.bin, built once from the player's ROM, stays as it is.
+// Skipped without Wi-Fi or when no_update_check.txt exists in the SD folder.
 
 #include <3ds.h>
 
@@ -12,7 +12,6 @@
 #include <string>
 
 #include "renderer_3ds.h"
-#include "rs3ds_build_id.h"
 
 namespace {
 
@@ -107,35 +106,6 @@ bool wifi_up() {
     return ok;
 }
 
-} // namespace
-
-void rs3ds_check_for_update(const char* dir) {
-    {
-        const std::string skip = std::string(dir) + "/no_update_check.txt";
-        if (FILE* f = std::fopen(skip.c_str(), "r")) {
-            std::fclose(f);
-            return;
-        }
-    }
-    if (!wifi_up()) return;
-    if (R_FAILED(httpcInit(0x10000))) return;
-    std::printf("Checking for updates...\n");
-    std::string json;
-    const bool got = http_get(kApi, json, 256 * 1024);
-    const std::string tag = got ? json_str(json, "tag_name") : std::string();
-    std::fprintf(stderr, "[update] this build %s, latest release %s\n", kVersion, tag.empty() ? "(unknown)" : tag.c_str());
-    if (tag.empty() || !newer(tag, kVersion)) {
-        if (!tag.empty()) std::printf("Up to date (%s).\n", kVersion);
-        httpcExit();
-        return;
-    }
-
-    std::printf("\nNew release: %s (you have %s).\nRun build_from_rom.py --serve on your PC to\nbuild it; it installs here at the next start.\n\n", tag.c_str(), kVersion);
-    httpcExit();
-}
-
-namespace {
-
 bool ask(const char* q) {
     std::printf("%s\nA: yes   B: no\n", q);
     while (aptMainLoop()) {
@@ -165,17 +135,7 @@ bool install_cia(const std::string& data) {
 
 } // namespace
 
-void rs3ds_update_from_pc(const char* dir) {
-    char host[128] = {};
-    {
-        const std::string cfg = std::string(dir) + "/update_source.txt";
-        FILE* f = std::fopen(cfg.c_str(), "r");
-        if (!f) return;
-        if (!std::fgets(host, sizeof host, f)) host[0] = 0;
-        std::fclose(f);
-        host[std::strcspn(host, "\r\n ")] = 0;
-        if (!host[0]) return;
-    }
+void rs3ds_check_for_update(const char* dir) {
     {
         const std::string skip = std::string(dir) + "/no_update_check.txt";
         if (FILE* f = std::fopen(skip.c_str(), "r")) {
@@ -183,39 +143,62 @@ void rs3ds_update_from_pc(const char* dir) {
             return;
         }
     }
-    if (!wifi_up() || R_FAILED(httpcInit(0x10000))) return;
-    const std::string base = std::string("http://") + host + "/";
-    std::string id;
-    if (http_get(base + "build_id.txt", id, 256)) {
-        id.erase(id.find_last_not_of("\r\n ") + 1);
-        std::fprintf(stderr, "[update] PC %s has build %s, this is %s\n", host, id.c_str(), RS3DS_BUILD_ID);
-        const bool cia = !envIsHomebrew();
-        if (!id.empty() && id != RS3DS_BUILD_ID && ask("\nYour PC has a new build. Install it?")) {
-            std::printf("Downloading...\n");
-            std::string bin;
-            const bool got = http_get(base + (cia ? "rs64.cia" : "rs64.3dsx"), bin, 48u * 1024 * 1024) && bin.size() > 1024;
-            bool ok = false;
-            if (got && cia) {
-                std::printf("Installing...\n");
-                ok = install_cia(bin);
-            } else if (got && std::memcmp(bin.data(), "3DSX", 4) == 0) {
-                const std::string tmp = std::string(dir) + "/rs64.3dsx.new", dst = std::string(dir) + "/rs64.3dsx";
-                FILE* f = std::fopen(tmp.c_str(), "wb");
-                ok = f && std::fwrite(bin.data(), 1, bin.size(), f) == bin.size();
-                if (f) std::fclose(f);
-                if (ok) {
-                    std::remove(dst.c_str());
-                    ok = std::rename(tmp.c_str(), dst.c_str()) == 0;
-                }
-            }
-            std::printf(ok ? "Installed. Restart the game to use it.\n" : "Update failed; starting this version.\n");
-            std::fprintf(stderr, "[update] install %s\n", ok ? "done" : "failed");
-            if (ok && ask("Quit now?")) {
-                httpcExit();
-                svcExitProcess();
-            }
+    if (!wifi_up()) return;
+    if (R_FAILED(httpcInit(0x10000))) return;
+    std::printf("Checking for updates...\n");
+    std::string json;
+    const bool got = http_get(kApi, json, 256 * 1024);
+    const std::string tag = got ? json_str(json, "tag_name") : std::string();
+    std::fprintf(stderr, "[update] this build %s, latest release %s\n", kVersion, tag.empty() ? "(unknown)" : tag.c_str());
+    if (tag.empty() || !newer(tag, kVersion)) {
+        if (!tag.empty()) std::printf("Up to date (%s).\n", kVersion);
+        httpcExit();
+        return;
+    }
+
+    const bool cia = !envIsHomebrew();
+    std::string asset;
+    for (size_t p = json.find("\"browser_download_url\""); p != std::string::npos; p = json.find("\"browser_download_url\"", p + 1)) {
+        const std::string u = json_str(json, "browser_download_url", p);
+        const char* ext = cia ? ".cia" : ".3dsx";
+        if (u.size() > std::strlen(ext) && u.compare(u.size() - std::strlen(ext), std::strlen(ext), ext) == 0) {
+            asset = u;
+            break;
         }
     }
+    std::printf("\nUpdate available: %s (you have %s).\n", tag.c_str(), kVersion);
+    if (asset.empty()) {
+        std::printf("No %s in that release yet.\n\n", cia ? "CIA" : "3dsx");
+        httpcExit();
+        return;
+    }
+    if (!ask("Download and install it?")) {
+        httpcExit();
+        return;
+    }
+    std::printf("Downloading...\n");
+    std::string bin;
+    const bool fetched = http_get(asset, bin, 48u * 1024 * 1024) && bin.size() > 1024;
+    bool ok = false;
+    if (fetched && cia) {
+        std::printf("Installing...\n");
+        ok = install_cia(bin);
+    } else if (fetched && std::memcmp(bin.data(), "3DSX", 4) == 0) {
+        const std::string tmp = std::string(dir) + "/rs64.3dsx.new", dst = std::string(dir) + "/rs64.3dsx";
+        FILE* f = std::fopen(tmp.c_str(), "wb");
+        ok = f && std::fwrite(bin.data(), 1, bin.size(), f) == bin.size();
+        if (f) std::fclose(f);
+        if (ok) {
+            std::remove(dst.c_str());
+            ok = std::rename(tmp.c_str(), dst.c_str()) == 0;
+        }
+    }
+    std::fprintf(stderr, "[update] %s %s\n", tag.c_str(), ok ? "installed" : "failed");
     httpcExit();
+    if (!ok) {
+        std::printf("Update failed; starting this version.\n");
+        return;
+    }
+    std::printf("Installed %s.\n", tag.c_str());
+    if (ask("Quit now to start the new version?")) svcExitProcess();
 }
-

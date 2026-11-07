@@ -1,0 +1,4 @@
+{
+  global: rs3ds_module_entry;
+  local: *;
+};
