@@ -27,32 +27,47 @@ yourself (below), and it stays personal: do not share it.
   - Python 3, CMake, and a host C++ compiler (for N64Recomp / RSPRecomp)
 - A New 3DS with the Homebrew Launcher (Luma3DS custom firmware) and `sdmc:/3ds/dspfirm.cdc` for sound (run the DSP1 homebrew once).
 
+## Building it the easy way (Windows, macOS, Linux)
+
+Install once:
+
+| | Windows | macOS | Linux |
+| --- | --- | --- | --- |
+| Git, CMake, a C++ compiler | Git for Windows, CMake, Visual Studio Build Tools (C++) | `xcode-select --install`, `brew install cmake` | `sudo apt install git cmake build-essential` |
+| Python 3.11+ | python.org | `brew install python` | your package manager |
+| devkitPro (3DS) | [installer](https://github.com/devkitPro/installer/releases), tick 3DS | [pkg](https://devkitpro.org/wiki/Getting_Started), then `sudo dkp-pacman -S 3ds-dev` | dkp-pacman, then `sudo dkp-pacman -S 3ds-dev` |
+| LLVM (clang + lld) | [LLVM installer](https://github.com/llvm/llvm-project/releases) | `brew install llvm lld` | `sudo apt install clang lld` |
+
+Then, from this repository:
+
+```bash
+python port3ds/build_from_rom.py path/to/your/rom.z64
+```
+
+It updates the clone, prepares everything, recompiles the game from your ROM and builds the port into
+`build3ds/sdcard/3ds/rs64/`. Run the same command again (the ROM path is only needed the first time) to update.
+
+- `--sd E:/` copies the result onto your SD card.
+- `--serve` keeps the build available on your network for the in-game updater (below).
+- `--send` sends `rs64.3dsx` straight to the Homebrew Launcher over Wi-Fi (press Y in the launcher first).
+
+### CIA
+
+If [makerom](https://github.com/3DSGuy/Project_CTR/releases) and [bannertool](https://github.com/Epicpkmn11/bannertool/releases)
+are installed (on your PATH, or set `MAKEROM` / `BANNERTOOL`), the build also makes `rs64.cia`, which you install with FBI
+to start the game from the HOME menu. Like the 3dsx, it is made from your ROM: keep it to yourself.
+
 ## Updates
 
-At each start (with Wi-Fi on) the game checks this repository's latest release and tells you when a newer version is out, so
-you can pull and rebuild. An empty `no_update_check.txt` in `sdmc:/3ds/rs64/` turns the check off.
+At each start (with Wi-Fi on) the game:
 
-## Building
+1. checks this repository's latest release and tells you when a newer version is out;
+2. if `update_source.txt` (written by the builder) points at your PC and `build_from_rom.py --serve` is running there with
+   a different build, offers to **install it**: it replaces `rs64.3dsx`, or installs `rs64.cia` through the system when
+   you started the game from the HOME menu. Restart the game to use it.
 
-1. Clone with submodules and apply the 3DS runtime changes:
-   ```bash
-   git clone --recursive https://github.com/yaboimanguy-a11y/rogue-squadron-3ds
-   cd rogue-squadron-3ds
-   git -C lib/N64ModernRuntime apply ../../port3ds/patches/N64ModernRuntime.patch
-   git -C lib/rt64 apply ../../port3ds/patches/rt64.patch
-   ```
-2. Generate the recompiled sources exactly as the desktop project does (its README covers each step):
-   - `RecompiledFuncs/` from the decomp ELF with N64Recomp (`regen_funcs`),
-   - `RecompiledPatches/` and `patches/patches.bin` (the patches ELF; needs a MIPS GCC),
-   - `build/factor5_ucode/` (RSPRecomp of `rsp/*.toml`, then `tools/fixup_factor5_ucode.cpp`),
-   - `src/game/state_table.inl` (`gen_state_table`).
-
-   The simplest route is to configure and build the desktop project once with CMake; it produces all of these.
-3. Build the 3DS port:
-   ```bash
-   python3 port3ds/build.py
-   ```
-   Output: `build3ds/sdcard/3ds/rs64/` with `rs64.3dsx` and `README.txt`. `--no-profile` drops the sampling profiler.
+So updating is: run `python port3ds/build_from_rom.py --serve` on your PC, then start the game on the 3DS and press A.
+An empty `no_update_check.txt` in `sdmc:/3ds/rs64/` turns both checks off.
 
 ## Installing
 

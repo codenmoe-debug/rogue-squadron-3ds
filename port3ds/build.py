@@ -10,6 +10,9 @@ Output: build3ds/sdcard/3ds/rs64/ (rs64.3dsx + README.txt), ready to copy to the
 """
 import argparse
 import concurrent.futures as cf
+import struct
+import time
+import zlib
 import os
 import re
 import shutil
@@ -35,6 +38,8 @@ GXX = str(DKA / "bin/arm-none-eabi-g++")
 GCC = str(DKA / "bin/arm-none-eabi-gcc")
 RT = ROOT / "lib/N64ModernRuntime"
 RT64 = ROOT / "lib/rt64"
+
+BUILD_ID = time.strftime("%Y%m%d-%H%M%S")
 
 ARCH_GCC = ["-march=armv6k", "-mtune=mpcore", "-mfloat-abi=hard", "-mtp=soft"]
 ARCH_CLANG = ["--target=armv6k-none-eabihf", "-mcpu=mpcore", "-mfloat-abi=hard", "-mfpu=vfpv2", "-marm", "-mtp=soft"]
@@ -148,6 +153,8 @@ def gen():
         body = ",\n".join("    " + ", ".join(f"0x{b:02x}" for b in data[i:i + 16]) for i in range(0, len(data), 16))
         (g / "rs_shbin.c").write_text(f"const unsigned char rs_shbin[] __attribute__((aligned(4))) = {{\n{body}\n}};\n"
                                       f"const unsigned int rs_shbin_size = {len(data)};\n")
+    # a new id every build: the in-game updater compares it with the build your PC serves (build_from_rom.py --serve)
+    (g / "rs3ds_build_id.h").write_text(f'#define RS3DS_BUILD_ID "{BUILD_ID}"\n')
     pb = ROOT / "patches/patches.bin"
     if stale(g / "patches_bin.c", [pb]):
         run([sys.executable, ROOT / "port3ds/tools/file_to_c.py", pb, "rs64_patches_bin", g / "patches_bin.c", g / "patches_bin.h"])
@@ -274,7 +281,49 @@ def package(elf):
     sd.mkdir(parents=True, exist_ok=True)
     shutil.copy2(x, sd / ("rs64.3dsx" if SAFE else "rs64_gpr32.3dsx"))
     shutil.copy2(ROOT / "port3ds/README.txt", sd / "README.txt")
+    (sd / "build_id.txt").write_text(BUILD_ID + "\n")
+    if SAFE:
+        make_cia(elf, smdh, sd)
     return sd
+
+
+def plain_png(path, w, h):
+    """A plain dark-blue gradient banner image (no artwork from the game)."""
+    rows = b"".join(b"\x00" + bytes([(10, 14 + y // 4, 40 + y // 2)[c] for x in range(w) for c in range(3)]) for y in range(h))
+    def chunk(t, d):
+        return struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d) & 0xFFFFFFFF)
+    path.write_bytes(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)) +
+                     chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b""))
+
+
+def silent_wav(path):
+    n = 16000
+    path.write_bytes(b"RIFF" + struct.pack("<I", 36 + n * 2) + b"WAVEfmt " + struct.pack("<IHHIIHH", 16, 1, 1, 16000, 32000, 2, 16) +
+                     b"data" + struct.pack("<I", n * 2) + bytes(n * 2))
+
+
+def find_tool(name):
+    for p in [os.environ.get(name.upper()), shutil.which(name), str(ROOT / "build-tools/cia" / name),
+              str(ROOT / "build-tools/cia" / (name + ".exe"))]:
+        if p and Path(p).exists():
+            return p
+    return None
+
+
+def make_cia(elf, smdh, sd):
+    """rs64.cia (installs to the HOME menu) when makerom and bannertool are available; skipped otherwise."""
+    makerom, bannertool = find_tool("makerom"), find_tool("bannertool")
+    if not makerom or not bannertool:
+        print("build3ds: no makerom/bannertool, so no CIA (see port3ds/README.md: Building a CIA)")
+        return
+    png, wav, bnr = OUT / "banner.png", OUT / "banner.wav", OUT / "banner.bnr"
+    plain_png(png, 256, 128)
+    silent_wav(wav)
+    run([bannertool, "makebanner", "-i", png, "-a", wav, "-o", bnr])
+    cia = OUT / "rs64.cia"
+    run([makerom, "-f", "cia", "-o", cia, "-elf", elf, "-rsf", ROOT / "port3ds/cia/rs64.rsf", "-icon", smdh, "-banner", bnr,
+         "-exefslogo", "-target", "t"])
+    shutil.copy2(cia, sd / "rs64.cia")
 
 
 def main():

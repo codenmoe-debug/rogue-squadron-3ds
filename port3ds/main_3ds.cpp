@@ -245,6 +245,7 @@ int main() {
     chdir(kDir);
     load_aspect();
     rs3ds_check_for_update(kDir);
+    rs3ds_update_from_pc(kDir);
     if (FILE* f = std::freopen("sdmc:/3ds/rs64/rs64_log.txt", "w", stderr)) setvbuf(f, nullptr, _IOLBF, 0);
 
     // the 3DS renderer walks the display list straight from RDRAM before the task completes

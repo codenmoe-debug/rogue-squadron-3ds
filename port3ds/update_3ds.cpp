@@ -1,15 +1,18 @@
-// Boot-time update check: asks GitHub for the latest release of this port and, when it is newer than this build,
-// offers to download its rs64.3dsx over the running one (it takes effect on the next start). Skipped without Wi-Fi
-// or when sdmc:/3ds/rs64/no_update_check.txt exists.
+// Boot-time updates. 1) GitHub: says when a newer release of this port is out (releases carry source only).
+// 2) Your PC: when update_source.txt in the SD folder holds "IP:port" of a PC running build_from_rom.py --serve and the PC
+// has a different build, offers to install it: the 3dsx over this one, or the CIA through the system installer when the
+// game runs from the HOME menu. Skipped without Wi-Fi or when no_update_check.txt exists.
 
 #include <3ds.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
 
 #include "renderer_3ds.h"
+#include "rs3ds_build_id.h"
 
 namespace {
 
@@ -127,47 +130,92 @@ void rs3ds_check_for_update(const char* dir) {
         return;
     }
 
-    // the release's .3dsx asset
-    std::string asset;
-    for (size_t p = json.find("\"browser_download_url\""); p != std::string::npos; p = json.find("\"browser_download_url\"", p + 1)) {
-        const std::string u = json_str(json, "browser_download_url", p);
-        if (u.size() > 5 && u.compare(u.size() - 5, 5, ".3dsx") == 0) {
-            asset = u;
-            break;
-        }
-    }
-    std::printf("\nUpdate available: %s (you have %s).\n", tag.c_str(), kVersion);
-    if (asset.empty()) {
-        std::printf("Get it from github.com/yaboimanguy-a11y/\nrogue-squadron-3ds/releases\n\n");
-        httpcExit();
-        return;
-    }
-    std::printf("A: download and install   B: skip\n");
-    bool go = false;
+    std::printf("\nNew release: %s (you have %s).\nRun build_from_rom.py --serve on your PC to\nbuild it; it installs here at the next start.\n\n", tag.c_str(), kVersion);
+    httpcExit();
+}
+
+namespace {
+
+bool ask(const char* q) {
+    std::printf("%s\nA: yes   B: no\n", q);
     while (aptMainLoop()) {
         hidScanInput();
         const u32 k = hidKeysDown();
-        if (k & KEY_A) { go = true; break; }
-        if (k & KEY_B) break;
+        if (k & KEY_A) return true;
+        if (k & KEY_B) return false;
         gspWaitForVBlank();
     }
-    if (go) {
-        std::printf("Downloading...\n");
-        std::string bin;
-        if (http_get(asset, bin, 32u * 1024 * 1024) && bin.size() > 1024 && std::memcmp(bin.data(), "3DSX", 4) == 0) {
-            const std::string tmp = std::string(dir) + "/rs64.3dsx.new", dst = std::string(dir) + "/rs64.3dsx";
-            FILE* f = std::fopen(tmp.c_str(), "wb");
-            const bool wrote = f && std::fwrite(bin.data(), 1, bin.size(), f) == bin.size();
-            if (f) std::fclose(f);
-            if (wrote && (std::remove(dst.c_str()), std::rename(tmp.c_str(), dst.c_str()) == 0)) {
-                std::printf("Installed %s. It starts next time.\n", tag.c_str());
-                std::fprintf(stderr, "[update] installed %s\n", tag.c_str());
-            } else {
-                std::printf("Could not write the update to the SD card.\n");
+    return false;
+}
+
+bool install_cia(const std::string& data) {
+    if (R_FAILED(amInit())) return false;
+    Handle h = 0;
+    bool ok = R_SUCCEEDED(AM_StartCiaInstall(MEDIATYPE_SD, &h));
+    for (size_t off = 0; ok && off < data.size(); off += 0x10000) {
+        u32 wrote = 0;
+        const u32 n = (u32)std::min<size_t>(0x10000, data.size() - off);
+        ok = R_SUCCEEDED(FSFILE_Write(h, &wrote, off, data.data() + off, n, 0)) && wrote == n;
+    }
+    if (ok) ok = R_SUCCEEDED(AM_FinishCiaInstall(h));
+    else if (h) AM_CancelCIAInstall(h);
+    amExit();
+    return ok;
+}
+
+} // namespace
+
+void rs3ds_update_from_pc(const char* dir) {
+    char host[128] = {};
+    {
+        const std::string cfg = std::string(dir) + "/update_source.txt";
+        FILE* f = std::fopen(cfg.c_str(), "r");
+        if (!f) return;
+        if (!std::fgets(host, sizeof host, f)) host[0] = 0;
+        std::fclose(f);
+        host[std::strcspn(host, "\r\n ")] = 0;
+        if (!host[0]) return;
+    }
+    {
+        const std::string skip = std::string(dir) + "/no_update_check.txt";
+        if (FILE* f = std::fopen(skip.c_str(), "r")) {
+            std::fclose(f);
+            return;
+        }
+    }
+    if (!wifi_up() || R_FAILED(httpcInit(0x10000))) return;
+    const std::string base = std::string("http://") + host + "/";
+    std::string id;
+    if (http_get(base + "build_id.txt", id, 256)) {
+        id.erase(id.find_last_not_of("\r\n ") + 1);
+        std::fprintf(stderr, "[update] PC %s has build %s, this is %s\n", host, id.c_str(), RS3DS_BUILD_ID);
+        const bool cia = !envIsHomebrew();
+        if (!id.empty() && id != RS3DS_BUILD_ID && ask("\nYour PC has a new build. Install it?")) {
+            std::printf("Downloading...\n");
+            std::string bin;
+            const bool got = http_get(base + (cia ? "rs64.cia" : "rs64.3dsx"), bin, 48u * 1024 * 1024) && bin.size() > 1024;
+            bool ok = false;
+            if (got && cia) {
+                std::printf("Installing...\n");
+                ok = install_cia(bin);
+            } else if (got && std::memcmp(bin.data(), "3DSX", 4) == 0) {
+                const std::string tmp = std::string(dir) + "/rs64.3dsx.new", dst = std::string(dir) + "/rs64.3dsx";
+                FILE* f = std::fopen(tmp.c_str(), "wb");
+                ok = f && std::fwrite(bin.data(), 1, bin.size(), f) == bin.size();
+                if (f) std::fclose(f);
+                if (ok) {
+                    std::remove(dst.c_str());
+                    ok = std::rename(tmp.c_str(), dst.c_str()) == 0;
+                }
             }
-        } else {
-            std::printf("Download failed; starting this version.\n");
+            std::printf(ok ? "Installed. Restart the game to use it.\n" : "Update failed; starting this version.\n");
+            std::fprintf(stderr, "[update] install %s\n", ok ? "done" : "failed");
+            if (ok && ask("Quit now?")) {
+                httpcExit();
+                svcExitProcess();
+            }
         }
     }
     httpcExit();
 }
+
