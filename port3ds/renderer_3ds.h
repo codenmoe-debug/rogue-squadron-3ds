@@ -11,5 +11,5 @@ std::unique_ptr<ultramodern::renderer::RendererContext> create_render_context(ui
 }
 
 // this build's release tag, compared with the latest GitHub release at boot (update_3ds.cpp)
-#define RS3DS_VERSION "v0.2"
+#define RS3DS_VERSION "v0.2.1"
 void rs3ds_check_for_update(const char* dir);

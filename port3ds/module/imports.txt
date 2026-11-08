@@ -232,3 +232,4 @@ rs64_wait_gfx_parse_yield
 rs64_wheel_typed
 sqrtf
 switch_error
+zmemcpy

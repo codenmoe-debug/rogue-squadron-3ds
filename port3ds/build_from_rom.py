@@ -14,6 +14,7 @@ import argparse
 import hashlib
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -90,33 +91,44 @@ def find_devkitpro():
 
 
 def find_llvm():
+    """An LLVM clang that can build for the 3DS (ARM). Apple's clang cannot; LLVM's, Visual Studio's and MSYS2's can."""
     cands = []
     if os.environ.get("LLVM_ROOT"):
         cands.append(Path(os.environ["LLVM_ROOT"]))
     if WIN:
-        cands.append(Path("C:/Program Files/LLVM"))
+        pf = [Path(os.environ.get(v, "")) for v in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432")]
+        cands += [p / "LLVM" for p in pf if str(p)]
+        cands += [Path.home() / "scoop/apps/llvm/current", Path("C:/msys64/clang64"), Path("C:/msys64/mingw64")]
+        for p in pf:
+            cands += sorted(p.glob("Microsoft Visual Studio/*/*/VC/Tools/Llvm/x64"), reverse=True) if str(p) else []
     elif MAC:
         cands += [Path("/opt/homebrew/opt/llvm"), Path("/usr/local/opt/llvm")]
+    else:
+        cands += sorted(Path("/usr/lib").glob("llvm-*"), reverse=True)
     clang = shutil.which("clang")
     if clang and not MAC:
         cands.append(Path(clang).resolve().parents[1])
+    tried = []
     for c in cands:
-        if (c / f"bin/clang{EXE}").exists():
-            # Apple's clang cannot build for the 3DS; LLVM's can
-            out = quiet([c / f"bin/clang{EXE}", "--print-targets"]).stdout
-            if "arm" in out and "mips" in out.lower():
-                return c
-    fail("LLVM clang with ARM and MIPS targets was not found (set LLVM_ROOT): " + install_hint("llvm"))
+        exe = c / f"bin/clang{EXE}"
+        if not exe.exists():
+            continue
+        out = quiet([exe, "--print-targets"]).stdout
+        if re.search(r"^\s+arm\s", out, re.M):
+            print(f"Using clang: {exe}")
+            return c
+        tried.append(str(exe))
+    extra = f" (found {', '.join(tried)}, but without ARM support)" if tried else ""
+    fail("LLVM clang was not found" + extra + ". Set LLVM_ROOT to the LLVM folder, or " + install_hint("llvm"))
 
 
 def find_lld(llvm):
+    """LLVM's linker, only needed to rebuild the patches (port3ds/prebuilt/patches.elf is used otherwise)."""
     for p in [llvm / f"bin/ld.lld{EXE}", Path("/opt/homebrew/opt/lld/bin/ld.lld"), Path("/usr/local/opt/lld/bin/ld.lld")]:
         if p.exists():
             return p
     w = shutil.which("ld.lld")
-    if w:
-        return Path(w)
-    fail("ld.lld (LLVM's linker) was not found: " + install_hint("llvm"))
+    return Path(w) if w else None
 
 
 def built(tool_dir, name):
@@ -197,19 +209,25 @@ def generate(llvm, lld):
     step("Building the base-game patches")
     gcc = shutil.which("mips64-elf-gcc") or shutil.which("mips-linux-gnu-gcc")
     ld = shutil.which("mips64-elf-ld") or shutil.which("mips-linux-gnu-ld")
-    if gcc and ld:
-        cc, cflags = [gcc], []
+    mips_clang = None
+    if not (gcc and ld) and lld:
+        out = quiet([llvm / f"bin/clang{EXE}", "--print-targets"]).stdout.lower()
+        mips_clang = "mips" in out
+    if (gcc and ld) or mips_clang:
+        cc, cflags = ([gcc], []) if gcc and ld else ([llvm / f"bin/clang{EXE}", "--target=mips-linux-gnu"], ["-fno-pic", "-mno-odd-spreg"])
+        ld = ld if gcc and ld else lld
+        obj_dir = REPO / "build-tools/patches"
+        obj_dir.mkdir(parents=True, exist_ok=True)
+        objs = []
+        for src in sorted((REPO / "patches/src").rglob("*.c")):
+            obj = obj_dir / (str(src.relative_to(REPO / "patches/src")).replace("/", "_").replace("\\", "_") + ".o")
+            run(cc + MIPS_CFLAGS + cflags + ["-c", src, "-o", obj])
+            objs.append(obj)
+        run([ld, "-nostdlib", "-T", REPO / "patches/patches.ld", "-T", REPO / "patches/syms.ld", "--unresolved-symbols=ignore-all",
+             "--emit-relocs", "--noinhibit-exec", "-e", "0"] + objs + ["-o", REPO / "patches/patches.elf"])
     else:
-        cc, cflags, ld = [llvm / f"bin/clang{EXE}", "--target=mips-linux-gnu"], ["-fno-pic", "-mno-odd-spreg"], lld
-    obj_dir = REPO / "build-tools/patches"
-    obj_dir.mkdir(parents=True, exist_ok=True)
-    objs = []
-    for src in sorted((REPO / "patches/src").rglob("*.c")):
-        obj = obj_dir / (str(src.relative_to(REPO / "patches/src")).replace("/", "_").replace("\\", "_") + ".o")
-        run(cc + MIPS_CFLAGS + cflags + ["-c", src, "-o", obj])
-        objs.append(obj)
-    run([ld, "-nostdlib", "-T", REPO / "patches/patches.ld", "-T", REPO / "patches/syms.ld", "--unresolved-symbols=ignore-all",
-         "--emit-relocs", "--noinhibit-exec", "-e", "0"] + objs + ["-o", REPO / "patches/patches.elf"])
+        # no MIPS compiler here: the prebuilt patches (the project's own C, compiled for MIPS)
+        shutil.copy2(REPO / "port3ds/prebuilt/patches.elf", REPO / "patches/patches.elf")
     run([n64recomp, "patches.toml"])
 
 

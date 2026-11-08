@@ -86,10 +86,46 @@ def stale(out, deps):
 MODULE_HOST = ["src/game/register_overlays.cpp", "src/game/register_patches.cpp"]
 
 
-def module_sources():
+RECOMP_DEF = re.compile(r"^RECOMP_FUNC void (\w+)\(uint8_t\* rdram, recomp_context\* ctx\) \{", re.M)
+
+
+def port_overrides(port_objs):
+    """Recompiled functions the port replaces with its own (zmemcpy): the desktop link lets the port's copy win; in
+    game.bin the recompiled copy is renamed away so its callers import the port's."""
+    nm = str(DKA / "bin/arm-none-eabi-nm")
+    rsp = OUT / "objs_nm.rsp"
+    rsp.write_text("\n".join(f'"{o}"' for o in port_objs))
+    out = run([nm, "-g", "--defined-only", f"@{rsp}"]).stdout
+    # the game's own main is compiled as rs_main (-Dmain=rs_main), so the port's main is not an override
+    return {l.split()[-1] for l in out.splitlines() if len(l.split()) == 3} - {"main"}
+
+
+def module_funcs(overrides):
+    """RecompiledFuncs/*.c, with the definitions of the port's overrides renamed (copies in build3ds/gen/mod)."""
+    out = []
+    gen = OUT / "gen/mod"
+    gen.mkdir(parents=True, exist_ok=True)
+    for src in sorted((ROOT / "RecompiledFuncs").glob("*.c")):
+        text = src.read_text()
+        hit = [n for n in RECOMP_DEF.findall(text) if n in overrides]
+        if not hit:
+            out.append(src)
+            continue
+        for n in hit:
+            text = text.replace(f"RECOMP_FUNC void {n}(uint8_t* rdram, recomp_context* ctx) {{",
+                                f"__attribute__((unused)) static void {n}__replaced_by_port(uint8_t* rdram, recomp_context* ctx) {{")
+        dst = gen / src.name
+        if not dst.exists() or dst.read_text() != text:
+            dst.write_text(text)
+        print(f"build3ds: game.bin uses the port's {', '.join(hit)}")
+        out.append(dst)
+    return out
+
+
+def module_sources(overrides=frozenset()):
     """(source, kind) for game.bin: the code recompiled from the ROM plus the tables that name it. Built on the player's
     computer only; never part of rs64.3dsx."""
-    s = [(p, "game") for p in sorted((ROOT / "RecompiledFuncs").glob("*.c"))]
+    s = [(p, "game") for p in module_funcs(overrides)]
     s += [(p, "cxx") for p in sorted((ROOT / "RecompiledFuncs").glob("*.cpp"))]
     s += [(ROOT / "src/game/toml_hooks.c", "game"), (ROOT / "RecompiledPatches/patches.c", "game"), (OUT / "gen/patches_bin.c", "game")]
     s += [(ROOT / "build/factor5_ucode/factor5_boot_recompiled.c", "cxx"), (ROOT / "build/factor5_ucode/musyx_audio_recompiled.c", "cxx")]
@@ -411,11 +447,14 @@ def main():
     if not (ROOT / "src/game/state_table.inl").exists():
         raise SystemExit("build3ds: src/game/state_table.inl is missing (build_from_rom.py makes it)")
     gen()
+    srcs = sources()
+    exports_src = OUT / "gen/host_exports.S"
+    objs = compile_all([x for x in srcs if x[0] != exports_src], a.jobs, False)
     game_bin = None
     if not a.port_only:
-        game_bin = link_module(compile_all(module_sources(), a.jobs, True))
+        game_bin = link_module(compile_all(module_sources(port_overrides(objs)), a.jobs, True))
     gen_host_exports()
-    objs = compile_all(sources(), a.jobs, False)
+    objs += compile_all([x for x in srcs if x[0] == exports_src], a.jobs, False)
     # project overrides (src/, port3ds/) before the runtime (lib/): with --allow-multiple-definition the first wins, as the desktop link
     elf = link(sorted(objs, key=lambda o: (o.name.startswith("lib__"), o.name)))
     sd = package(elf)
