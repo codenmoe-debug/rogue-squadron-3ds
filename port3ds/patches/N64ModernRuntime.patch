@@ -744,7 +744,7 @@ index 8ca779e..e0eeeda 100644
  #else
      std::quick_exit(exit_status);
 diff --git a/ultramodern/src/events.cpp b/ultramodern/src/events.cpp
-index b4119b7..8d53550 100644
+index b4119b7..aad8712 100644
 --- a/ultramodern/src/events.cpp
 +++ b/ultramodern/src/events.cpp
 @@ -1,3 +1,6 @@
@@ -754,7 +754,46 @@ index b4119b7..8d53550 100644
  #include <thread>
  #include <atomic>
  #include <chrono>
-@@ -478,17 +481,102 @@ static bool audio_async_enabled() {
+@@ -294,6 +297,19 @@ uint64_t total_vis = 0;
+ extern std::atomic_bool exited;
+ extern moodycamel::LightweightSemaphore graphics_shutdown_ready;
+ 
++#ifdef __3DS__
++// Quitting on the 3DS: the renderer (core 1) and the synth (core 2) must be gone before the process ends, or the system
++// takes the whole console down. Each event thread marks itself finished; rs3ds_stop_event_threads waits for them.
++static std::atomic<bool> g_gfx_done{ false }, g_vi_done{ false }, g_task_done{ false }, g_ai_done{ true };
++struct DoneFlag {
++    std::atomic<bool>& f;
++    ~DoneFlag() { f.store(true); }
++};
++#define RS3DS_MARK_DONE(flag) DoneFlag done_flag_{ flag }
++#else
++#define RS3DS_MARK_DONE(flag)
++#endif
++
+ void set_dummy_vi(bool odd);
+ 
+ // RogueSquadron64Recomp (2026-09-08): hardware raises the AI interrupt each time a DMA buffer finishes
+@@ -310,6 +326,10 @@ static bool ai_consumption_paced() {
+ extern std::mutex g_rs64_ai_mutex;
+ extern std::deque<std::chrono::steady_clock::time_point> g_rs64_ai_deadlines;
+ void ai_thread_func() {
++#ifdef __3DS__
++    g_ai_done.store(false);
++#endif
++    RS3DS_MARK_DONE(g_ai_done);
+     ultramodern::set_native_thread_name("AI Thread");
+     ultramodern::set_native_thread_priority(ultramodern::ThreadPriority::Critical);
+     using namespace std::chrono_literals;
+@@ -336,6 +356,7 @@ void ai_thread_func() {
+ }
+ 
+ void vi_thread_func() {
++    RS3DS_MARK_DONE(g_vi_done);
+     ultramodern::set_native_thread_name("VI Thread");
+     // This thread should be prioritized over every other thread in the application, as it's what allows
+     // the game to generate new audio and gfx lists.
+@@ -478,17 +499,103 @@ static bool audio_async_enabled() {
      return s_async != 0;
  }
  
@@ -847,6 +886,7 @@ index b4119b7..8d53550 100644
 +
  
  void task_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_ready) {
++    RS3DS_MARK_DONE(g_task_done);
      ultramodern::set_native_thread_name("SP Task Thread");
 +#ifdef __3DS__
 +    // shares core 2 with the renderer: the game waits on the audio synth (wait_for_pending_audio_synth), so it goes first
@@ -857,7 +897,17 @@ index b4119b7..8d53550 100644
  
      // Notify the caller thread that this thread is ready.
      thread_ready->signal();
-@@ -516,6 +604,9 @@ void task_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_r
+@@ -498,7 +605,8 @@ void task_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_r
+         OSTask* task;
+         events_context.sp_task_queue.wait_dequeue(task);
+ 
+-        if (task == nullptr) {
++        // quitting: drop queued tasks instead of synthesizing them (the game keeps queueing new ones)
++        if (task == nullptr || exited) {
+             return;
+         }
+ 
+@@ -516,6 +624,9 @@ void task_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_r
          // assumption the gfx path makes). Default off.
          const bool early_complete = (audio_async_enabled() && task_type == M_AUDTASK);
          if (early_complete) {
@@ -867,7 +917,7 @@ index b4119b7..8d53550 100644
              sp_complete();
          }
  
-@@ -524,6 +615,10 @@ void task_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_r
+@@ -524,6 +635,10 @@ void task_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_r
              ULTRAMODERN_QUICK_EXIT();
          }
  
@@ -878,7 +928,7 @@ index b4119b7..8d53550 100644
          // Tell the game that the RSP has completed (unless already signaled early).
          if (!early_complete) {
              sp_complete();
-@@ -535,6 +630,13 @@ void task_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_r
+@@ -535,6 +650,13 @@ void task_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_r
                  std::lock_guard lock{ g_audio_synth_mutex };
                  g_audio_synth_cv.notify_all();
              }
@@ -892,7 +942,7 @@ index b4119b7..8d53550 100644
          }
  
          (void)task_type;
-@@ -573,6 +675,32 @@ void ultramodern::trigger_config_action() {
+@@ -573,7 +695,34 @@ void ultramodern::trigger_config_action() {
  std::atomic<ultramodern::renderer::SetupResult> renderer_setup_result = ultramodern::renderer::SetupResult::Success;
  std::atomic<ultramodern::renderer::GraphicsApi> renderer_chosen_api = ultramodern::renderer::GraphicsApi::Auto;
  
@@ -923,9 +973,11 @@ index b4119b7..8d53550 100644
 +#endif
 +
  void gfx_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_ready, ultramodern::renderer::WindowHandle window_handle) {
++    RS3DS_MARK_DONE(g_gfx_done);
      bool enabled_instant_present = false;
      using namespace std::chrono_literals;
-@@ -619,7 +747,7 @@ void gfx_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_re
+ 
+@@ -619,7 +768,7 @@ void gfx_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_re
                  // RogueSquadron64Recomp (2026-09-07): ROGUESQ_SP_COMPLETE_AFTER_PARSE=1 delivers the SP-done
                  // event only after the list has been parsed, as the RSP would. With the early completion the
                  // game recycles DL chunks the HLE is still walking (phantom commands / garbage SETCIMG).
@@ -934,7 +986,7 @@ index b4119b7..8d53550 100644
                  if (!s_sp_after) sp_complete();
                  ultramodern::measure_input_latency();
  
-@@ -633,6 +761,9 @@ void gfx_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_re
+@@ -633,6 +782,9 @@ void gfx_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_re
                  static unsigned s_task_n = 0; ++s_task_n;
                  if (s_log_task) { fprintf(stderr, "[gfx-task #%u] parse dl=0x%08X\n", s_task_n, (uint32_t)displaylist); fflush(stderr); }
                  g_rs64_parse_rdram = task_action->snapshot;
@@ -944,7 +996,7 @@ index b4119b7..8d53550 100644
                  renderer_context->send_dl(&task_action->task);
                  g_rs64_parse_rdram = nullptr;
                  // RogueSquadron64Recomp (2026-09-09): dump the EXACT snapshot the parser just walked, so
-@@ -667,10 +798,14 @@ void gfx_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_re
+@@ -667,10 +819,14 @@ void gfx_thread_func(uint8_t* rdram, moodycamel::LightweightSemaphore* thread_re
                  }
                  [[maybe_unused]] auto renderer_end = std::chrono::high_resolution_clock::now();
  
@@ -963,7 +1015,7 @@ index b4119b7..8d53550 100644
                  if (s_log_task) { fprintf(stderr, "[gfx-task #%u] done sp+dp signaled parse=%lld us pdl=%lld us hops=%u faces=%u req=%u inflight=%d\n", s_task_n, (long long)std::chrono::duration_cast<std::chrono::microseconds>(renderer_end - renderer_start).count(), g_rs64_pdl_us, g_f5_task_hops, g_f5_task_faces, g_rs64_gfx_requests, g_gfx_parse_inflight.load(std::memory_order_acquire)); fflush(stderr); }
                  // TODO hook the parsed event up to the actual parsing point when a callback is added to RT64.
                  ultramodern::extensions::on_displaylist_parsed(displaylist);
-@@ -902,6 +1037,9 @@ void ultramodern::submit_rsp_task(RDRAM_ARG PTR(OSTask) task_) {
+@@ -902,6 +1058,9 @@ void ultramodern::submit_rsp_task(RDRAM_ARG PTR(OSTask) task_) {
          // for the output buffer to be filled before the game plays it.
          if (audio_async_enabled() && task->t.type == M_AUDTASK) {
              g_pending_audio_synth.fetch_add(1, std::memory_order_acq_rel);
@@ -973,7 +1025,7 @@ index b4119b7..8d53550 100644
          }
          events_context.sp_task_queue.enqueue(task);
      }
-@@ -927,7 +1065,16 @@ void ultramodern::init_events(RDRAM_ARG ultramodern::renderer::WindowHandle wind
+@@ -927,7 +1086,16 @@ void ultramodern::init_events(RDRAM_ARG ultramodern::renderer::WindowHandle wind
      moodycamel::LightweightSemaphore gfx_thread_ready;
      moodycamel::LightweightSemaphore task_thread_ready;
      events_context.rdram = rdram;
@@ -990,11 +1042,39 @@ index b4119b7..8d53550 100644
      events_context.sp.task_thread = std::thread{ task_thread_func, rdram, &task_thread_ready };
  
      // Wait for the two sp threads to be ready before continuing to prevent the game from
+@@ -980,6 +1148,22 @@ void ultramodern::init_events(RDRAM_ARG ultramodern::renderer::WindowHandle wind
+     if (ai_consumption_paced()) { static std::thread s_ai_thread{ ai_thread_func }; s_ai_thread.detach(); }
+ }
+ 
++#ifdef __3DS__
++// Ends the renderer, VI, synth and AI threads (the renderer shuts citro3d down on its own thread); true when all have
++// finished within timeout_ms.
++extern "C" bool rs3ds_stop_event_threads(int timeout_ms) {
++    exited.store(true);
++    graphics_shutdown_ready.signal();
++    events_context.sp_task_queue.enqueue(nullptr);
++    for (int t = 0; t < timeout_ms; t += 5) {
++        if (g_gfx_done && g_vi_done && g_task_done && g_ai_done) return true;
++        std::this_thread::sleep_for(std::chrono::milliseconds(5));
++    }
++    fprintf(stderr, "[3ds] threads still running at exit: gfx=%d vi=%d synth=%d ai=%d\n", !g_gfx_done, !g_vi_done, !g_task_done, !g_ai_done);
++    return false;
++}
++#endif
++
+ void ultramodern::join_event_threads() {
+     events_context.sp.gfx_thread.join();
+     events_context.vi.thread.join();
 diff --git a/ultramodern/src/threads.cpp b/ultramodern/src/threads.cpp
-index 4b5fdb6..ef59941 100644
+index 4b5fdb6..6c070cf 100644
 --- a/ultramodern/src/threads.cpp
 +++ b/ultramodern/src/threads.cpp
-@@ -173,6 +173,30 @@ void ultramodern::set_native_thread_name(const std::string& name) {
+@@ -1,3 +1,4 @@
++#include <algorithm>
+ #include <cstdio>
+ #include <thread>
+ #include <cassert>
+@@ -173,16 +174,86 @@ void ultramodern::set_native_thread_name(const std::string& name) {
  }
  
  void ultramodern::set_native_thread_priority(ThreadPriority pri) {}
@@ -1025,7 +1105,44 @@ index 4b5fdb6..ef59941 100644
  #endif
  
  [[noreturn]] static void end_deleted_thread(UltraThreadContext* cur_context);
-@@ -182,7 +206,15 @@ void wait_for_resumed(RDRAM_ARG UltraThreadContext* thread_context) {
+ 
++#ifdef __3DS__
++// Quitting on the 3DS: every game thread is woken and ends itself at its next wait (the console must not end the
++// process with them running). g_game_contexts holds the context of each live game thread.
++static std::atomic<bool> g_quitting{ false };
++static std::mutex g_game_mutex;
++static std::vector<UltraThreadContext*> g_game_contexts;
++
++static void game_thread_started(UltraThreadContext* c) {
++    std::lock_guard lock{ g_game_mutex };
++    g_game_contexts.push_back(c);
++}
++
++static void game_thread_ended(UltraThreadContext* c) {
++    std::lock_guard lock{ g_game_mutex };
++    g_game_contexts.erase(std::remove(g_game_contexts.begin(), g_game_contexts.end(), c), g_game_contexts.end());
++}
++
++// Returns how many game threads are still alive after timeout_ms.
++extern "C" int rs3ds_stop_game_threads(int timeout_ms) {
++    g_quitting.store(true);
++    for (int t = 0; t <= timeout_ms; t += 5) {
++        size_t left;
++        {
++            std::lock_guard lock{ g_game_mutex };
++            for (UltraThreadContext* c : g_game_contexts) c->running.signal();
++            left = g_game_contexts.size();
++        }
++        if (left == 0) return 0;
++        std::this_thread::sleep_for(std::chrono::milliseconds(5));
++    }
++    std::lock_guard lock{ g_game_mutex };
++    return (int)g_game_contexts.size();
++}
++#endif
++
+ void wait_for_resumed(RDRAM_ARG UltraThreadContext* thread_context) {
+     if (thread_context == nullptr) {
          printf("[CRASH] wait_for_resumed called with NULL context! thread_self=0x%08X\n", (uint32_t)ultramodern::this_thread()); fflush(stdout);
          std::abort();
      }
@@ -1038,6 +1155,39 @@ index 4b5fdb6..ef59941 100644
 +#ifdef RS3DS_PROFILE
 +    rs3ds_prof_resume(prof_thread, prof_id);
 +#endif
++#ifdef __3DS__
++    if (g_quitting) end_deleted_thread(thread_context);
++#endif
      // If this thread's context was replaced/deleted by another thread destroying
      // us, terminate this host thread directly. The old path called
      // osDestroyThread(NULL), which throws thread_terminated to unwind out to
+@@ -283,6 +354,9 @@ void run_next_thread(RDRAM_ARG1) {
+ // Enqueue this thread's context for the cleaner (which joins this host thread)
+ // and exit it, matching _thread_func's deleted-context tail. See wait_for_resumed.
+ [[noreturn]] static void end_deleted_thread(UltraThreadContext* cur_context) {
++#ifdef __3DS__
++    game_thread_ended(cur_context);
++#endif
+     ultramodern::cleanup_thread(cur_context);
+ #ifdef _WIN32
+     _endthreadex(0);
+@@ -337,6 +411,9 @@ static void _thread_func(RDRAM_ARG PTR(OSThread) self_, PTR(thread_func_t) entry
+     ultramodern::set_native_thread_name(_thread_name);
+     ultramodern::set_native_thread_priority(ultramodern::ThreadPriority::High);
+ 
++#ifdef __3DS__
++    game_thread_started(thread_context);
++#endif
+     // Signal the initialized semaphore to indicate that this thread can be started.
+     thread_context->initialized.signal();
+ 
+@@ -382,6 +459,9 @@ static void _thread_func(RDRAM_ARG PTR(OSThread) self_, PTR(thread_func_t) entry
+     }
+ 
+     // Dispose of this thread now that it's completed or terminated.
++#ifdef __3DS__
++    game_thread_ended(thread_context);
++#endif
+     ultramodern::cleanup_thread(thread_context);
+ }
+ 

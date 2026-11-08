@@ -103,20 +103,28 @@ static void park_renderer() {
 
 // The game's threads never return, so the app cannot leave through main(): release the GPU, the DSP and the game
 // module's memory, tell APT the app is closing, then end the process.
+extern "C" bool rs3ds_stop_event_threads(int timeout_ms);   // ultramodern events.cpp
+extern "C" int rs3ds_stop_game_threads(int timeout_ms);   // ultramodern threads.cpp
 void rs3ds_module_release();   // module_loader.cpp
 
 [[noreturn]] static void shutdown_and_exit(const char* why) {
     std::fprintf(stderr, "[3ds] %s: shutting down\n", why);
     std::fflush(stderr);
     park_renderer();
+    // every thread ends before the process does, as a normal homebrew exit: the game's threads (core 0) end at their
+    // next wait, then the renderer (core 1, it shuts citro3d down itself) and synth (core 2)
+    const int game_left = rs3ds_stop_game_threads(2000);
+    const bool stopped = rs3ds_stop_event_threads(2000);
+    std::fprintf(stderr, "[3ds] threads: %d game threads left, event threads %s\n", game_left, stopped ? "stopped" : "still running");
     ndspExit();
-    C3D_Fini();
+    if (!stopped) C3D_Fini();
     gfxExit();
-    rs3ds_module_release();
-    hidExit();
-    aptExit();
-    svcExitProcess();
-    for (;;) {}
+    APT_SetAppCpuTimeLimit(30);
+    std::fprintf(stderr, "[3ds] shutdown done\n");
+    std::fflush(stderr);
+    if (game_left == 0) rs3ds_module_release();
+    // libctru's normal exit (closes APT, HID, FS and the services), as returning from main would
+    _exit(0);
 }
 
 static void apt_hook(APT_HookType hook, void*) {
