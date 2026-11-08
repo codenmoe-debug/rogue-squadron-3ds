@@ -24,9 +24,6 @@ Controls
    D-pad, START    D-pad, START
    L + R + START + SELECT: quit
 
-Quitting: the game uses almost all of the New 3DS memory, so the
-console may need a restart after you quit. That is normal.
-
 Sound: the game's audio is capped at 22050 Hz to save CPU. To try a
 lower rate (less CPU, duller sound), put a file audio_rate.txt in this
 folder containing just a number, e.g. 16000. Delete it to go back.

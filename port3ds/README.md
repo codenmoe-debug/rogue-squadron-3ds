@@ -35,7 +35,6 @@ restart the game. An empty `no_update_check.txt` in `sdmc:/3ds/rs64/` turns the 
 - Missions run roughly 12-25 fps, cutscenes faster; performance work is ongoing.
 - Sound at 16000 Hz by default is recommended (see `audio_rate.txt` below).
 - Widescreen (wider field of view), stereoscopic 3D, radar on the bottom screen.
-- Quitting: because the game uses almost all of the New 3DS memory, the console may need a restart after you quit (from the HOME menu or with L + R + START + SELECT). That is normal.
 - Known issues: the 3D logo at boot has a white sky; occasional frame drops on level loads.
 
 ## What you need
