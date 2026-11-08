@@ -37,6 +37,7 @@ extern const unsigned int rs_shbin_size;
 // set by main_3ds.cpp: a touch on the bottom screen asks for a frame dump; HOME menu / sleep suspends drawing
 extern "C" volatile int g_rs3ds_dump_request;
 extern "C" volatile int g_rs3ds_suspended;
+extern "C" volatile int g_rs3ds_gpu_parked;
 extern "C" volatile int g_rs3ds_widescreen;
 extern "C" void rs3ds_gfx_release();   // ultramodern events.cpp: the game may go on with its next frame   // 1: a 25% wider view, presented across the full 400 px
 
@@ -209,6 +210,7 @@ private:
     C3D_RenderTarget* radar_rt = nullptr;
     bool radar_drawn = false;
     void route_target(bool radar);
+    void park_gpu();
     void apply_scissor(const DrawState& s);
     unsigned radar_seq_seen = 0, stat_radar_hook = 0, stat_radar_match = 0, stat_radar_fallback = 0;
     float last_mv_t[3] = { 0.f, 0.f, 0.f };   // the modelview translation closest to the radar's (diagnostics)
@@ -620,8 +622,26 @@ void Renderer3DS::update_radar_crop() {
 }
 
 void Renderer3DS::update_screen() {
-    if (g_rs3ds_suspended) return;
+    if (g_rs3ds_suspended) {
+        park_gpu();
+        return;
+    }
+    g_rs3ds_gpu_parked = 0;
     if (in_frame && drew) frame_end();
+}
+
+// HOME menu, sleep or quitting: finish the open frame so no command list is left half-built on the GPU, then leave the
+// GPU alone until resumed (main_3ds.cpp waits for g_rs3ds_gpu_parked before giving the GPU away)
+void Renderer3DS::park_gpu() {
+    if (in_frame) {
+        flush();
+        C3D_FrameEnd(0);
+        in_frame = false;
+        drew = false;
+        have_batch = false;
+        frame++;
+    }
+    g_rs3ds_gpu_parked = 1;
 }
 
 void Renderer3DS::shutdown() {
@@ -2207,7 +2227,10 @@ void Renderer3DS::end_snapshot() {
 
 void Renderer3DS::send_dl(const OSTask* task) {
     if (!ok || !task) return;
-    if (g_rs3ds_suspended) return;   // HOME menu / sleep: the GPU belongs to the system
+    if (g_rs3ds_suspended) {   // HOME menu / sleep: the GPU belongs to the system
+        park_gpu();
+        return;
+    }
     if (g_rs3ds_dump_request && dump_tasks == 0) {
         g_rs3ds_dump_request = 0;
         dump_tasks = 4;

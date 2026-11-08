@@ -5,6 +5,7 @@
 // boots use the stored copy. Logs go to rs64_log.txt in that folder and to the bottom screen.
 
 #include <3ds.h>
+#include <citro3d.h>
 
 #include <atomic>
 #include <cstdio>
@@ -69,6 +70,7 @@ static std::atomic<int32_t> g_stick{ 0 };   // x in the low 16 bits, y in the hi
 static std::atomic<int32_t> g_cstick{ 0 };
 
 extern "C" { volatile int g_rs3ds_dump_request = 0; volatile int g_rs3ds_suspended = 0; volatile int g_rs3ds_widescreen = 0; }
+extern "C" { volatile int g_rs3ds_gpu_parked = 1; }
 
 // aspect.txt in the SD folder: "wide" = widescreen (wider field of view), anything else = the original 4:3
 static void load_aspect() {
@@ -91,9 +93,35 @@ static void save_aspect() {
 static aptHookCookie g_apt_cookie;
 void rs3ds_audio_resync();   // sdl_shim_3ds.cpp
 
+// stops drawing and waits (up to 0.5 s) until the renderer has closed its frame and the GPU has run it
+static void park_renderer() {
+    g_rs3ds_gpu_parked = 0;
+    g_rs3ds_suspended = 1;
+    for (int i = 0; i < 50 && !g_rs3ds_gpu_parked; i++) svcSleepThread(10000000LL);
+    svcSleepThread(40000000LL);
+}
+
+// The game's threads never return, so the app cannot leave through main(): release the GPU, the DSP and the game
+// module's memory, tell APT the app is closing, then end the process.
+void rs3ds_module_release();   // module_loader.cpp
+
+[[noreturn]] static void shutdown_and_exit(const char* why) {
+    std::fprintf(stderr, "[3ds] %s: shutting down\n", why);
+    std::fflush(stderr);
+    park_renderer();
+    ndspExit();
+    C3D_Fini();
+    gfxExit();
+    rs3ds_module_release();
+    hidExit();
+    aptExit();
+    svcExitProcess();
+    for (;;) {}
+}
+
 static void apt_hook(APT_HookType hook, void*) {
     if (hook == APTHOOK_ONSUSPEND || hook == APTHOOK_ONSLEEP) {
-        g_rs3ds_suspended = 1;
+        park_renderer();
     } else if (hook == APTHOOK_ONRESTORE || hook == APTHOOK_ONWAKEUP) {
         // the game kept queueing sound while away: drop that backlog so sound lines up with the picture again
         rs3ds_audio_resync();
@@ -159,14 +187,7 @@ static void update_gfx(ultramodern::gfx_callbacks_t::gfx_data_t) {
     const uint64_t now = ms_now();
     if (now - g_last_scan < 4) return;
     g_last_scan = now;
-    if (!aptMainLoop()) {
-        // closing from the HOME menu: the game's threads never finish, so leave at once (a clean
-        // shutdown hangs on "closing software")
-        std::fprintf(stderr, "[3ds] exit requested\n");
-        std::fflush(stderr);
-        ndspExit();
-        svcExitProcess();
-    }
+    if (!aptMainLoop()) shutdown_and_exit("closed from the HOME menu");
     hidScanInput();
     if (hidKeysDown() & KEY_TOUCH) {
         if ((hidKeysHeld() & (KEY_L | KEY_R)) == (KEY_L | KEY_R)) {
@@ -187,10 +208,7 @@ static void update_gfx(ultramodern::gfx_callbacks_t::gfx_data_t) {
     g_cstick.store((int32_t)(uint16_t)cs.dx | ((int32_t)cs.dy << 16));
     const uint32_t quit = KEY_L | KEY_R | KEY_START | KEY_SELECT;
     if ((held & quit) == quit) {
-        std::fprintf(stderr, "[3ds] quit combo\n");
-        std::fflush(stderr);
-        ndspExit();
-        svcExitProcess();
+        shutdown_and_exit("quit combo");
     }
 }
 

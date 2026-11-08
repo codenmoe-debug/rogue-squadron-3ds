@@ -18,6 +18,9 @@ extern "C" const struct { const char* name; void* addr; } rs3ds_host_exports[];
 
 namespace {
 
+uint8_t* g_base = nullptr;
+uint32_t g_size = 0;
+
 void* host_symbol(const char* name) {
     for (size_t i = 0; rs3ds_host_exports[i].name; i++) {
         if (std::strcmp(rs3ds_host_exports[i].name, name) == 0) return rs3ds_host_exports[i].addr;
@@ -164,6 +167,8 @@ const RS3DSModule* rs3ds_load_module(const char* path, char* err, size_t err_siz
         }
     }
     svcCloseHandle(proc);
+    g_base = base;
+    g_size = size;
 
     // constructors, then the entry point
     if (init) ((void (*)())(base + init))();
@@ -191,4 +196,15 @@ const RS3DSModule* rs3ds_load_module(const char* path, char* err, size_t err_siz
         return nullptr;
     }
     return m;
+}
+
+// Back to read/write before the process ends, so the kernel frees the module's heap pages as it allocated them.
+void rs3ds_module_release() {
+    if (!g_base) return;
+    Handle proc = 0;
+    if (R_SUCCEEDED(svcDuplicateHandle(&proc, CUR_PROCESS_HANDLE))) {
+        svcControlProcessMemory(proc, (u32)(uintptr_t)g_base, (u32)(uintptr_t)g_base, g_size, MEMOP_PROT, MEMPERM_READ | MEMPERM_WRITE);
+        svcCloseHandle(proc);
+    }
+    g_base = nullptr;
 }
