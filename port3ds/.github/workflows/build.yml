@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
+  build-3ds:
     runs-on: ubuntu-latest
     container: devkitpro/devkitarm:latest
 
@@ -23,15 +23,16 @@ jobs:
         run: |
           dkp-pacman -Sy --noconfirm 3ds-dev 3ds-portlibs
 
-      - name: Build Project
+      - name: Build 3DS Binary
         shell: bash
         run: |
-          make -f Makefile 3ds # atau sesuaikan perintah build (misal: cmake -B build && cmake --build build)
+          # Menjalankan build menggunakan Makefile utama
+          make
 
-      - name: Upload Build Artifact
+      - name: Upload 3DS Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: 3ds-game-build
+          name: 3ds-executable
           path: |
             *.3dsx
             *.cia
