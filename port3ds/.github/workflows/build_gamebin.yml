@@ -1,4 +1,4 @@
-name: Build Game Bin (Rogue Squadron 3DS)
+name: Extract Game Bin from ROM
 
 on:
   push:
@@ -20,25 +20,20 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install System Dependencies (LLVM/Clang & Tools)
+      - name: Install Dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y clang llvm build-essential
 
-      - name: Install Python Dependencies
+      - name: Extract ROM to game.bin
         run: |
-          python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-
-      - name: Run Build From ROM Script
-        run: |
-          # Menjalankan script ekstraksi sesuai struktur porter
-          python port3ds/build_from_rom.py --rom *.z64 --output game.bin
+          # Jika file ROM N64 bernama baserom.z64 berada di root repositori
+          python port3ds/build_from_rom.py *.z64 --no-pull
 
       - name: Upload game.bin Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: RogueSquadron-game.bin
+          name: game-bin-output
           path: |
             game.bin
             port3ds/game.bin
