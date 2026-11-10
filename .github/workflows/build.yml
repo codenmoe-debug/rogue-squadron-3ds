@@ -1,0 +1,39 @@
+name: Build Automated Workflow
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch: # Memungkinkan trigger build secara manual dari tab Actions
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive # Diperlukan jika ada sub-module C++/Android
+
+      # Contoh setup environment (sesuaikan jika ini project Android/C++)
+      - name: Set up JDK (Jika menggunakan Android/Gradle)
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      # Contoh perintah build (ganti sesuai cara build project Anda)
+      - name: Build Project
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug
+
+      # Mengunggah hasil build (Artifact) agar bisa di-download
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-output
+          path: |
+            android/app/build/outputs/apk/debug/*.apk
