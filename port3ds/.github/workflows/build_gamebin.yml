@@ -20,15 +20,14 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install Dependencies
+      - name: Install System Dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y clang llvm build-essential
 
-      - name: Extract ROM to game.bin
+      - name: Run Build From ROM Script
         run: |
-          # Jika file ROM N64 bernama baserom.z64 berada di root repositori
-          python port3ds/build_from_rom.py *.z64 --no-pull
+          python port3ds/build_from_rom.py baserom.z64 --no-pull
 
       - name: Upload game.bin Artifact
         uses: actions/upload-artifact@v4
