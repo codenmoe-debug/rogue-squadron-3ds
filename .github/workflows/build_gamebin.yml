@@ -1,0 +1,44 @@
+name: Build Game Bin (Rogue Squadron 3DS)
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build-bin:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install System Dependencies (LLVM/Clang & Tools)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm build-essential
+
+      - name: Install Python Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Run Build From ROM Script
+        run: |
+          # Menjalankan script ekstraksi sesuai struktur porter
+          python port3ds/build_from_rom.py --rom *.z64 --output game.bin
+
+      - name: Upload game.bin Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: RogueSquadron-game.bin
+          path: |
+            game.bin
+            port3ds/game.bin
